@@ -2,6 +2,7 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import morgan from "morgan";
+import crypto from "crypto";
 import { rateLimit } from "express-rate-limit";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
@@ -26,6 +27,18 @@ import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { AppError, NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
+// #23 — inbound request IDs are only trusted if they match this format.
+// Anything else (newlines, control chars, oversized values) is discarded
+// and replaced with a generated UUID to avoid log injection.
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
+
+function resolveRequestId(inbound: unknown): string {
+  if (typeof inbound === "string" && REQUEST_ID_PATTERN.test(inbound)) {
+    return inbound;
+  }
+  return crypto.randomUUID();
+}
+
 export function createApp(
   stellar: StellarService = new StellarService(),
   globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
@@ -40,6 +53,16 @@ export function createApp(
   // lets a client spoof their apparent IP if there's more than one real
   // proxy hop between them and this process.
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
+
+  // #23 — request ID middleware must run first so every response (success
+  // or error) carries X-Request-Id and downstream handlers/logs can read
+  // req.requestId. Accept a well-formed inbound ID, otherwise generate one.
+  app.use((req, res, next) => {
+    const requestId = resolveRequestId(req.headers["x-request-id"]);
+    req.requestId = requestId;
+    res.setHeader("X-Request-Id", requestId);
+    next();
+  });
 
   // helmet()'s defaults are tuned for a server rendering HTML (CSP that
   // still allows inline styles/scripts via nonces, X-Frame-Options, a
@@ -69,8 +92,22 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  app.use(cors({ origin: config.CORS_ORIGIN.split(",") }));
-  app.use(morgan("combined"));
+  // #23 — expose X-Request-Id so browser clients can read it from responses.
+  app.use(
+    cors({
+      origin: config.CORS_ORIGIN.split(","),
+      exposedHeaders: ["X-Request-Id"],
+    })
+  );
+
+  // #23 — include the request ID in every morgan log line so a UI error can
+  // be correlated with the exact server log entry.
+  morgan.token("request-id", (req) => (req as express.Request).requestId ?? "-");
+  app.use(
+    morgan(
+      ':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" request-id=:request-id'
+    )
+  );
 
   // A multi-signed transaction envelope (several signatures on one XDR
   // blob) or a fee-bump wrapping one can comfortably exceed a few KB, and

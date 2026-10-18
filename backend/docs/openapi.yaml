@@ -16,6 +16,29 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: >-
+        Optional client-supplied correlation ID. Accepted only when it matches
+        `^[A-Za-z0-9-]{8,64}$`; otherwise the server generates a UUID. The
+        resolved value is always echoed back in the `X-Request-Id` response
+        header and included in error envelopes as `requestId`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
+  headers:
+    X-Request-Id:
+      description: >-
+        Correlation ID for this request. Present on every response (success
+        and error). Use it to find the matching server log line.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
   schemas:
     ErrorResponse:
       $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse"
@@ -101,6 +124,8 @@ components:
   responses:
     ValidationError:
       description: Input failed validation
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -109,12 +134,15 @@ components:
               $ref: "./openapi-errors.yaml#/components/examples/BadRequest400"
     Unauthorized:
       description: Missing or invalid bearer token
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example:
             code: AUTH_HEADER_INVALID
             error: Missing or malformed Authorization header
+            requestId: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
 
 paths:
   /api/v1/wallet/send/precheck:
@@ -128,6 +156,8 @@ paths:
         above the spendable balance. A well-formed request always returns
         200; problems come back as warnings.
       security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
       requestBody:
         required: true
         content:
@@ -146,6 +176,8 @@ paths:
       responses:
         "200":
           description: Precheck result
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/SendPrecheckResponse" }
@@ -180,9 +212,13 @@ paths:
         `payment`. Otherwise an unfunded destination is rejected with
         `DESTINATION_NOT_FUNDED` before anything is signed.
       security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
       responses:
         "200":
           description: Submitted
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
           content:
             application/json:
               schema:
@@ -192,6 +228,8 @@ paths:
                   successful: { type: boolean }
         "400":
           description: Validation failure, MEMO_REQUIRED or DESTINATION_NOT_FUNDED
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -205,121 +243,8 @@ paths:
                       destination: GB...
                       minimumStartingBalance: "1"
                     retryable: false
+                    requestId: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
         "401": { $ref: "#/components/responses/Unauthorized" }
 
   /api/v1/wallet/partial-transaction:
     post:
-      summary: Build and partially sign a send (createAccount for unfunded XLM destinations, #65)
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Partially signed transaction
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [xdr, hash, operationType]
-                properties:
-                  xdr: { type: string }
-                  hash: { type: string }
-                  operationType: { $ref: "#/components/schemas/SendOperationType" }
-        "400":
-          description: Validation failure or DESTINATION_NOT_FUNDED (reason NON_NATIVE_ASSET | BELOW_MINIMUM_STARTING_BALANCE)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/resolve:
-    get:
-      summary: Resolve a G..., M... or federation (SEP-2) address (#63)
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string, maxLength: 256 }
-          examples:
-            federation: { value: "alice*example.com" }
-            muxed: { value: "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUAAAAAAAAAAAACJUQ" }
-      responses:
-        "200":
-          description: Resolved account
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ResolvedAddress" }
-              examples:
-                federation:
-                  value: { type: federation, accountId: GB..., memo: "12345", memoType: id }
-                muxed:
-                  value: { type: muxed, accountId: GA7Q..., muxedId: "1234", muxedAddress: MA7Q... }
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Federation server has no record for the name
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_NOT_FOUND, error: Federation address alice*example.com was not found }
-        "502":
-          description: Domain has no stellar.toml / FEDERATION_SERVER, or it returned an invalid record
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_UNAVAILABLE, error: "Could not resolve alice*example.com: the domain has no reachable federation server", retryable: true }
-        "504":
-          description: Federation server did not answer within 3 seconds
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_TIMEOUT, error: Federation server for alice*example.com did not respond within 3000ms, retryable: true }
-
-  /api/v1/account/{publicKey}/transactions/export.csv:
-    get:
-      summary: Download payment history as CSV (#62)
-      description: >-
-        Streams a CSV statement of the account's payment-shaped operations
-        (payments, path payments, create_account, account_merge), newest
-        first. Columns: date, type, direction (in|out|self), amount, asset
-        ("XLM" or CODE:ISSUER), counterparty, memo, fee (XLM, only on rows
-        whose transaction this account paid for; repeated per operation in
-        multi-op transactions), hash. Cells starting with = + - @ are
-        prefixed with ' to prevent spreadsheet formula injection. If Horizon
-        fails mid-stream the connection is aborted rather than ending
-        cleanly, so a truncated file is detectable.
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: publicKey
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/AccountId" }
-        - name: from
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive start (ISO-8601). Defaults to 365 days before `to`.
-        - name: to
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive end (ISO-8601). Defaults to now. Range may not exceed 366 days.
-      responses:
-        "200":
-          description: CSV stream
-          content:
-            text/csv:
-              schema: { type: string }
-              example: |
-                date,type,direction,amount,asset,counterparty,memo,fee,hash
-                2026-03-01T10:00:00Z,payment,out,25.0000000,XLM,GB...,rent,0.0000100,ab12...
-        "400":
-          description: VALIDATION_ERROR, INVALID_EXPORT_RANGE or EXPORT_RANGE_TOO_LARGE
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: EXPORT_RANGE_TOO_LARGE, error: Export range must not exceed 1 year, details: { maxRangeDays: 366 } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Account not found
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: ACCOUNT_NOT_FOUND, error: Account GB... was not found on Horizon }
