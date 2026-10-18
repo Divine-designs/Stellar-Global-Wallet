@@ -226,7 +226,11 @@ export class StellarService {
     const records = await builder.call();
 
     const dustThreshold = config.SPAM_DUST_THRESHOLD;
-    const verifiedAssets = parseVerifiedAssetsList(config.VERIFIED_ASSETS);
+    // Curated list (#54) plus any per-deployment VERIFIED_ASSETS additions.
+    const verifiedAssets = new Set([
+      ...verifiedAssetKeys(),
+      ...parseVerifiedAssetsList(config.VERIFIED_ASSETS),
+    ]);
 
     const payments: PaymentHistoryItem[] = await Promise.all(
       records.records.map(async (op) => {

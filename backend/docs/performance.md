@@ -27,14 +27,15 @@ first baseline, please fill in this table and replace this paragraph.
 | `GET /account/:publicKey/balances` | — | — | — | — | |
 | `GET /account/:publicKey/transactions` | — | — | — | — | |
 | `GET /account/:publicKey/payments` | — | — | — | — | |
-| `GET /price/:asset` | — | — | — | — | placeholder endpoint, no upstream I/O |
+| `GET /price/:asset` | — | — | — | — | cached 30 s; misses hit Horizon orderbook / CoinGecko |
+| `GET /price?assets=…` (batch, up to 50) | — | — | — | — | shares the spot cache; misses batched per provider |
 
 ## Thresholds used by the scripts
 
 Default thresholds (overridable per run, see `load-tests/config.js`):
 
 - Horizon-backed endpoints (overview, balances, history): p50 < 300ms, p95 < 800ms, error rate < 1%.
-- `price` (no upstream I/O): p50 < 100ms, p95 < 300ms, error rate < 1%.
+- `price` (mostly cache hits after warm-up): p50 < 100ms, p95 < 300ms, error rate < 1%.
 
 These are starting points, not measured targets — tighten or loosen them
 once the baseline above is filled in.

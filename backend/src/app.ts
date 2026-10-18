@@ -23,10 +23,12 @@ import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
+import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
 export function createApp(
   stellar: StellarService = new StellarService(),
-  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService())
+  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
+  priceServices: { prices: PriceService; history: PriceHistoryService } = createDefaultPriceServices()
 ) {
   const app = express();
 
