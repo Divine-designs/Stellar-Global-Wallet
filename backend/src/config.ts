@@ -118,6 +118,25 @@ const envSchema = z.object({
   // the worker logs an alert because the retention gap means events were
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
+
+  // #34 — httpOnly cookie session mode for the web app. When enabled, the
+  // web client can opt into cookie-based sessions via `?mode=cookie` on
+  // /auth/token and /auth/refresh instead of storing JWTs in localStorage.
+  // Mobile keeps Bearer mode (the default).
+  //
+  // Cookies are named `__Host-gw_at` / `__Host-gw_rt` in production, which
+  // RFC 6265bis requires to be Secure, host-only (no Domain) and Path=/. On
+  // plain http://localhost the browser rejects `__Host-` cookies, so a
+  // dev-only name (`gw_at` / `gw_rt`) is used instead. Set COOKIE_SECURE=false
+  // to force the dev cookie names (e.g. local dev over http).
+  COOKIE_SECURE: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+  // Explicit allow-list of browser origins permitted to send credentialed
+  // requests. Required when cookie mode is used — CORS with credentials must
+  // never use `*`. Comma-separated; falls back to CORS_ORIGIN when unset.
+  CORS_CREDENTIALS_ORIGINS: z.string().optional(),
 });
 
 export const config = envSchema.parse(process.env);

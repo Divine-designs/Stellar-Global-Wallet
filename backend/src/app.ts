@@ -69,7 +69,10 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  app.use(cors({ origin: config.CORS_ORIGIN.split(",") }));
+  // #34 — cookie session mode needs credentialed CORS. `credentials: true`
+  // is incompatible with a wildcard origin, so the explicit allow-list from
+  // CORS_ORIGIN is required (never `*`). Bearer-token clients are unaffected.
+  app.use(cors({ origin: config.CORS_ORIGIN.split(","), credentials: true }));
   app.use(morgan("combined"));
 
   // A multi-signed transaction envelope (several signatures on one XDR
