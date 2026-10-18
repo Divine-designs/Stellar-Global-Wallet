@@ -20,6 +20,26 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
+## Exploring the API with Postman
+
+A Postman collection generated from [docs/openapi.yaml](docs/openapi.yaml) lives
+at [docs/globe-wallet.postman_collection.json](docs/globe-wallet.postman_collection.json).
+It lets you explore endpoints without a UI and has the auth flow pre-wired.
+
+1. Import `docs/globe-wallet.postman_collection.json` into Postman.
+2. Set the `baseUrl` collection variable (defaults to `http://localhost:4000`)
+   and fill in `email` / `password` — no secrets are stored in the file.
+3. Run **Auth / Login** first. Its test script stores the returned bearer token
+   in the `token` collection variable, which every other request uses.
+4. Run any other request; the collection-level pre-request script warns if the
+   token is missing.
+
+To regenerate the collection after changing the spec:
+
+```bash
+npx openapi-to-postmanv2 -s docs/openapi.yaml -o docs/globe-wallet.postman_collection.json -p
+```
+
 ## Send flow & statements
 
 OpenAPI: [docs/openapi.yaml](docs/openapi.yaml). All routes below need a bearer
