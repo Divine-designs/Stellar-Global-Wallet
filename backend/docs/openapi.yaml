@@ -138,6 +138,23 @@ components:
             `horizon` when the values come from live `/fee_stats`;
             `fallback` when Horizon was unreachable and the base fee (100
             stroops) is returned for every tier.
+    ContractFeeEstimate:
+      type: object
+      required: [inclusionFee, resourceFee, totalFee]
+      description: >-
+        Soroban fee estimate for a contract call (#14). Each tier is a
+        `FeeEstimate` (stroops + XLM strings). `inclusionFee` is the classic
+        per-operation inclusion fee; `resourceFee` is the Soroban
+        `minResourceFee` from simulation; `totalFee` is their sum. The
+        estimate matches the fee in the XDR produced by the corresponding
+        build route for the same inputs.
+      properties:
+        inclusionFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        resourceFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        totalFee:
+          $ref: "#/components/schemas/FeeEstimate"
   responses:
     ValidationError:
       description: Input failed validation
@@ -188,6 +205,67 @@ paths:
                     ledgerCapacityUsage: "0"
                     source: fallback
 
+  /api/v1/contract/wallet/estimate:
+    post:
+      summary: Estimate the Soroban resource fee for a contract call (#14)
+      description: >-
+        Runs simulation only (no XDR is built or returned) and reports the
+        inclusion fee, the Soroban `minResourceFee` and their total so the
+        UI can show the full cost before signing a spend, recovery or
+        guardian change. The estimate matches the fee in the XDR produced
+        by the corresponding build route for the same inputs. If simulation
+        fails the mapped contract error is returned instead of a fee.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, sourcePublicKey]
+              properties:
+                action:
+                  type: string
+                  enum:
+                    - record_spend
+                    - set_spend_limit
+                    - add_guardian
+                    - remove_guardian
+                    - add_asset
+                    - remove_asset
+                    - recovery_initiate
+                    - recovery_approve
+                    - recovery_revoke
+                    - recovery_execute
+                    - recovery_cancel
+                  description: Contract action to simulate.
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                params:
+                  type: object
+                  additionalProperties: true
+                  description: >-
+                    Action-specific parameters, identical to the matching
+                    build route. Amounts are decimal strings.
+      responses:
+        "200":
+          description: Fee estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractFeeEstimate" }
+              example:
+                inclusionFee: { stroops: "100", xlm: "0.0000100" }
+                resourceFee: { stroops: "123456", xlm: "0.0123456" }
+                totalFee: { stroops: "123556", xlm: "0.0123556" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Simulation failed — mapped contract error, not a fee
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
   /api/v1/wallet/send/precheck:
     post:
       summary: Check a send for problems before signing (#64)
@@ -214,69 +292,4 @@ paths:
                 memo:
                   type: string
                   description: MEMO_TEXT, at most 28 UTF-8 bytes.
-      responses:
-        "200":
-          description: Precheck result
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SendPrecheckResponse" }
-              examples:
-                memoRequired:
-                  value:
-                    warnings:
-                      - code: MEMO_REQUIRED
-                        message: The destination requires a memo (SEP-29), e.g. an exchange deposit ID. Sending without one may lose funds.
-                        blocking: true
-                    blocking: true
-                    operationType: payment
-                    spendable: "98.4999900"
-                willCreate:
-                  value:
-                    warnings:
-                      - code: DESTINATION_WILL_BE_CREATED
-                        message: Destination account does not exist yet. It will be created and funded with this amount.
-                        blocking: false
-                    blocking: false
-                    operationType: createAccount
-                    spendable: "98.4999900"
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/send:
-    post:
-      summary: Send a payment (createAccount for unfunded XLM destinations, #65)
-      description: >-
-        If the destination does not exist and the asset is XLM with
-        amount >= 1, a `createAccount` operation is submitted instead of
-        `payment`. Otherwise an unfunded destination is rejected with
-        `DESTINATION_NOT_FUNDED` before anything is signed.
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Submitted
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  hash: { type: string }
-                  successful: { type: boolean }
-        "400":
-          description: Validation failure, MEMO_REQUIRED or DESTINATION_NOT_FUNDED
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              examples:
-                destinationNotFunded:
-                  value:
-                    code: DESTINATION_NOT_FUNDED
-                    error: Destination account GB... does not exist. Only XLM can be sent to a new account (at least 1 XLM, via createAccount).
-                    details:
-                      reason: NON_NATIVE_ASSET
-                      destination: GB...
-                      minimumStartingBalance: "1"
-                    retryable: false
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/partial-transaction:
-    post:
+      r
