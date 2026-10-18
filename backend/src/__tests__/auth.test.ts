@@ -154,3 +154,57 @@ describe("wallet routes with JWT", () => {
     expect(res.body.secretKey).toBe("SABC1234");
   });
 });
+
+describe("read endpoint caching (ETag / Cache-Control)", () => {
+  const account = "GABC1234";
+
+  async function getAccessToken(): Promise<string> {
+    const login = await request(app)
+      .post("/api/v1/auth/login")
+      .set("x-api-key", "test-api-key");
+    return login.body.accessToken;
+  }
+
+  it("sets a weak ETag and private revalidation Cache-Control on account", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .get(`/api/v1/account/${account}`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .expect(200);
+
+    expect(res.headers.etag).toBeTruthy();
+    expect(res.headers.etag.startsWith("W/")).toBe(true);
+    expect(res.headers["cache-control"]).toBe("private, max-age=0, must-revalidate");
+  });
+
+  it("returns 304 when If-None-Match matches the current ETag", async () => {
+    const accessToken = await getAccessToken();
+    const first = await request(app)
+      .get(`/api/v1/account/${account}`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .expect(200);
+
+    const etag = first.headers.etag;
+    expect(etag).toBeTruthy();
+
+    const second = await request(app)
+      .get(`/api/v1/account/${account}`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .set("If-None-Match", etag)
+      .expect(304);
+
+    expect(second.text).toBeFalsy();
+  });
+
+  it("exposes ETag via CORS Access-Control-Expose-Headers", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .get(`/api/v1/account/${account}`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .set("Origin", "https://example.com")
+      .expect(200);
+
+    const exposed = (res.headers["access-control-expose-headers"] || "").toLowerCase();
+    expect(exposed).toContain("etag");
+  });
+});

@@ -34,6 +34,12 @@ export function createApp(
 ) {
   const app = express();
 
+  // #29 — weak ETags let polling clients (dashboard balances/assets) cheaply
+  // revalidate with If-None-Match and get a 304 instead of a full payload.
+  // Express computes a weak ETag from the JSON body by default; make it
+  // explicit so the behaviour is documented and stable.
+  app.set("etag", "weak");
+
   // Must be set before any middleware that reads req.ip (rate limiter
   // below, and anything else added later) — see issue #90. The hop count
   // is configured via TRUST_PROXY_HOPS (config.ts) rather than hardcoded
@@ -79,7 +85,14 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  app.use(cors({ origin: config.CORS_ORIGIN.split(",") }));
+  // #29 — expose ETag to browser clients so they can read it and send it
+  // back via If-None-Match for cheap revalidation.
+  app.use(
+    cors({
+      origin: config.CORS_ORIGIN.split(","),
+      exposedHeaders: ["ETag"],
+    })
+  );
   app.use(morgan("combined"));
 
   // A multi-signed transaction envelope (several signatures on one XDR
@@ -111,6 +124,20 @@ export function createApp(
 
   // #93 — resolve Accept-Language into req.locale for all routes.
   app.use(localeMiddleware);
+
+  // #29 — per-account read endpoints (account, balances, assets) must never
+  // be stored in shared caches: mark them private and force revalidation so
+  // a stale balance is never served without an ETag check.
+  const privateRevalidate = (
+    _req: express.Request,
+    res: express.Response,
+    next: express.NextFunction
+  ) => {
+    res.setHeader("Cache-Control", "private, max-age=0, must-revalidate");
+    next();
+  };
+  app.use("/api/v1/account", privateRevalidate);
+  app.use("/api/v1/assets", privateRevalidate);
 
   // Health
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
