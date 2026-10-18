@@ -13,7 +13,8 @@
     "type-check": "tsc --noEmit",
     "seed:demo": "tsx scripts/seed-demo-wallet.ts",
     "indexer": "tsx src/indexer/run.ts",
-    "indexer:backfill": "tsx src/indexer/backfill.ts"
+    "indexer:backfill": "tsx src/indexer/backfill.ts",
+    "mock": "prism mock docs/openapi.yaml -p 4010 --dynamic=false"
   },
   "dependencies": {
     "@globe-wallet/sdk": "^0.1.0",
@@ -35,6 +36,7 @@
   "devDependencies": {
     "@babel/core": "^7.24.0",
     "@babel/preset-env": "^7.24.0",
+    "@stoplight/prism-cli": "^5.8.0",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
     "@types/jest": "^29.5.12",
