@@ -19,6 +19,7 @@ import { createPendingTxRouter } from "./routes/pendingTx";
 import { createResolveRouter } from "./routes/resolve";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
+import { requireAccountMatch } from "./middleware/requireAccountMatch";
 import { config } from "./config";
 import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
@@ -135,6 +136,32 @@ async function runHealthChecks(): Promise<HealthDetails> {
   return { status, checks };
 }
 
+/**
+ * Resolves the account a request targets for the account-match guard.
+ * Checks common locations (body/query/params) for a source/account field.
+ * Returns undefined when the request does not target a specific account.
+ */
+function resolveTargetAccount(req: express.Request): string | undefined {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = req.query as Record<string, unknown>;
+  const params = req.params as Record<string, unknown>;
+  const candidates = [
+    body.sourceAccount,
+    body.source,
+    body.account,
+    body.publicKey,
+    body.guardian,
+    query.sourceAccount,
+    query.account,
+    params.account,
+    params.publicKey,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
 export function createApp(
   stellar: StellarService = new StellarService(),
   globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
@@ -195,83 +222,56 @@ export function createApp(
   app.use("/api/v1/wallet/fee-bump", express.json({ limit: "64kb" }));
   app.use("/api/v1/wallet/submit-multisig", express.json({ limit: "64kb" }));
   // #74 — pending multisig store: create/add-signature/submit all carry an
-  // XDR envelope (plus a signature), so they need the same larger limit.
-  app.use("/api/v1/pending-txs", express.json({ limit: "64kb" }));
+  // XDR envelope (plus a signature), so they need the larger limit too.
+  app.use("/api/v1/wallet/pending-multisig", express.json({ limit: "64kb" }));
   app.use(express.json({ limit: "10kb" }));
 
-  app.use(
-    rateLimit({
-      windowMs: 15 * 60 * 1000, // 15 min
-      max: 100,
-      standardHeaders: true,
-      legacyHeaders: false,
-    })
-  );
-
-  // #93 — resolve Accept-Language into req.locale for all routes.
   app.use(localeMiddleware);
 
-  // Health
-  app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  // #33 — deny-by-default account scoping. A valid JWT for account A must
+  // not be usable to act for account B. Applied to the protected route
+  // groups below; the resolver reads the target account from the request
+  // (source account for build routes, guardian address for guardian
+  // actions). Read-only public data (balances) stays public.
+  const accountMatch = requireAccountMatch(resolveTargetAccount);
 
-  // #30 — detailed health: per-dependency status + latency, cached for 10s.
-  let healthCache: { at: number; value: HealthDetails } | null = null;
-  app.get("/api/v1/health/details", async (_req, res, next) => {
+  const limiter = rateLimit({
+    windowMs: 60_000,
+    limit: 120,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+  });
+  app.use("/api/", limiter);
+
+  app.get("/health", async (_req, res, next) => {
     try {
-      const now = Date.now();
-      if (!healthCache || now - healthCache.at > HEALTH_CACHE_TTL_MS) {
-        healthCache = { at: now, value: await runHealthChecks() };
-      }
-      res.json(healthCache.value);
+      const details = await runHealthChecks();
+      const httpStatus = details.status === "down" ? 503 : 200;
+      res.status(httpStatus).json(details);
     } catch (err) {
       next(err);
     }
   });
 
-  // Unversioned and unauthenticated: this is where a browser enforcing
-  // the Content-Security-Policy documented in docs/security/csp.md sends
-  // violation reports, not something our own API clients call, so it
-  // doesn't live under /api/v1 alongside the versioned wallet/account/etc.
-  // routes (see issue: "Add Content-Security-Policy guidance for the
-  // future web app").
-  app.use("/csp-report", cspReportRouter);
-
-  // Routes
-  app.use("/api/v1/wallet", createWalletRouter(stellar));
-  app.use("/api/v1/account", createAccountRouter(stellar));
-  // #63 — resolve G.../M.../federation (name*domain) addresses
-  app.use("/api/v1/resolve", createResolveRouter());
-  app.use("/api/v1/contract", createContractRouter(globeWallet));
-  app.use("/api/v1/price", priceRouter);
-  // #52, #53 — asset search and stellar.toml metadata for the add-asset flow
-  app.use("/api/v1/assets", createAssetsRouter());
   app.use("/api/v1/auth", authRouter);
+  app.use("/api/v1/csp-report", cspReportRouter);
   app.use("/api/v1/flags", flagsRouter);
-  // #87 — push notification device registration
-  app.use("/api/v1/me/devices", devicesRouter);
-  // #90 — email notification fallback (verified email management)
-  app.use("/api/v1/me/email", emailRouter);
-  // #74 — pending multisig transaction store for co-signers
-  app.use("/api/v1/pending-txs", createPendingTxRouter(stellar));
-  // #81 — Expose network, Horizon/RPC URLs, and pending upgrade timelock state
-  const configRouter = createConfigRouter(globeWallet);
-  app.use("/api/v1/config", configRouter);
-  app.use("/config", configRouter);
+  app.use("/api/v1/price", priceRouter);
+  app.use("/api/v1/email", emailRouter);
 
-  // #69 — testnet-only Friendbot funding for one-click onboarding. The
-  // router is only mounted when the configured network is testnet, so on
-  // mainnet the path falls through to the 404 handler below.
-  if (config.STELLAR_NETWORK === "testnet") {
-    app.use("/api/v1/dev", createDevRouter());
-  }
+  // Protected route groups: scoped to the authenticated account (#33).
+  app.use("/api/v1/wallet", accountMatch, createWalletRouter(stellar, globeWallet));
+  app.use("/api/v1/account", accountMatch, createAccountRouter(stellar));
+  app.use("/api/v1/contract", accountMatch, createContractRouter(globeWallet));
+  app.use("/api/v1/transactions", accountMatch, createTransactionsRouter(stellar));
+  app.use("/api/v1/assets", accountMatch, createAssetsRouter(stellar));
+  app.use("/api/v1/devices", accountMatch, devicesRouter);
+  app.use("/api/v1/config", accountMatch, createConfigRouter());
+  app.use("/api/v1/pending-tx", accountMatch, createPendingTxRouter());
+  app.use("/api/v1/resolve", accountMatch, createResolveRouter());
 
-  app.use((req, _res, next) => {
-    next(
-      new NotFoundError(
-        `Route ${req.method} ${req.originalUrl} was not found`,
-        "ROUTE_NOT_FOUND"
-      )
-    );
+  app.use((_req, _res, next) => {
+    next(new NotFoundError("Route not found"));
   });
 
   app.use(errorHandler);
