@@ -98,6 +98,63 @@ components:
         muxedAddress:
           type: string
           description: The original M... address (muxed only).
+    FeeEstimate:
+      type: object
+      required: [stroops, xlm]
+      description: >-
+        A single fee tier. `stroops` is the per-operation fee in stroops
+        (1 XLM = 10,000,000 stroops) as a decimal string; `xlm` is the same
+        value formatted as an XLM decimal string. Both are strings so no
+        precision is lost in JSON.
+      properties:
+        stroops:
+          type: string
+          pattern: '^\d+$'
+          example: "100"
+        xlm:
+          type: string
+          pattern: '^\d+(\.\d{1,7})?$'
+          example: "0.0000100"
+    NetworkFeesResponse:
+      type: object
+      required: [low, normal, high, ledgerCapacityUsage, source]
+      properties:
+        low:
+          $ref: "#/components/schemas/FeeEstimate"
+        normal:
+          $ref: "#/components/schemas/FeeEstimate"
+        high:
+          $ref: "#/components/schemas/FeeEstimate"
+        ledgerCapacityUsage:
+          type: string
+          description: >-
+            Fraction (0–1) of the latest ledger's capacity in use, as a
+            decimal string. "0" when served from the fallback.
+          example: "0.42"
+        source:
+          type: string
+          enum: [horizon, fallback]
+          description: >-
+            `horizon` when the values come from live `/fee_stats`;
+            `fallback` when Horizon was unreachable and the base fee (100
+            stroops) is returned for every tier.
+    ContractFeeEstimate:
+      type: object
+      required: [inclusionFee, resourceFee, totalFee]
+      description: >-
+        Soroban fee estimate for a contract call (#14). Each tier is a
+        `FeeEstimate` (stroops + XLM strings). `inclusionFee` is the classic
+        per-operation inclusion fee; `resourceFee` is the Soroban
+        `minResourceFee` from simulation; `totalFee` is their sum. The
+        estimate matches the fee in the XDR produced by the corresponding
+        build route for the same inputs.
+      properties:
+        inclusionFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        resourceFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        totalFee:
+          $ref: "#/components/schemas/FeeEstimate"
   responses:
     ValidationError:
       description: Input failed validation
@@ -117,6 +174,98 @@ components:
             error: Missing or malformed Authorization header
 
 paths:
+  /api/v1/network/fees:
+    get:
+      summary: Estimate low/normal/high network fees from Horizon fee stats (#13)
+      description: >-
+        Returns the p10/p50/p90 per-operation fees from Horizon
+        `/fee_stats` so the send flow can offer priority options during
+        surge pricing. Responses are cached in memory for 5 seconds. If
+        Horizon is unreachable the base fee (100 stroops) is returned for
+        every tier with `source: "fallback"`.
+      responses:
+        "200":
+          description: Fee estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkFeesResponse" }
+              examples:
+                horizon:
+                  value:
+                    low: { stroops: "100", xlm: "0.0000100" }
+                    normal: { stroops: "200", xlm: "0.0000200" }
+                    high: { stroops: "1500", xlm: "0.0001500" }
+                    ledgerCapacityUsage: "0.42"
+                    source: horizon
+                fallback:
+                  value:
+                    low: { stroops: "100", xlm: "0.0000100" }
+                    normal: { stroops: "100", xlm: "0.0000100" }
+                    high: { stroops: "100", xlm: "0.0000100" }
+                    ledgerCapacityUsage: "0"
+                    source: fallback
+
+  /api/v1/contract/wallet/estimate:
+    post:
+      summary: Estimate the Soroban resource fee for a contract call (#14)
+      description: >-
+        Runs simulation only (no XDR is built or returned) and reports the
+        inclusion fee, the Soroban `minResourceFee` and their total so the
+        UI can show the full cost before signing a spend, recovery or
+        guardian change. The estimate matches the fee in the XDR produced
+        by the corresponding build route for the same inputs. If simulation
+        fails the mapped contract error is returned instead of a fee.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, sourcePublicKey]
+              properties:
+                action:
+                  type: string
+                  enum:
+                    - record_spend
+                    - set_spend_limit
+                    - add_guardian
+                    - remove_guardian
+                    - add_asset
+                    - remove_asset
+                    - recovery_initiate
+                    - recovery_approve
+                    - recovery_revoke
+                    - recovery_execute
+                    - recovery_cancel
+                  description: Contract action to simulate.
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                params:
+                  type: object
+                  additionalProperties: true
+                  description: >-
+                    Action-specific parameters, identical to the matching
+                    build route. Amounts are decimal strings.
+      responses:
+        "200":
+          description: Fee estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractFeeEstimate" }
+              example:
+                inclusionFee: { stroops: "100", xlm: "0.0000100" }
+                resourceFee: { stroops: "123456", xlm: "0.0123456" }
+                totalFee: { stroops: "123556", xlm: "0.0123556" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Simulation failed — mapped contract error, not a fee
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
   /api/v1/wallet/send/precheck:
     post:
       summary: Check a send for problems before signing (#64)
@@ -143,183 +292,4 @@ paths:
                 memo:
                   type: string
                   description: MEMO_TEXT, at most 28 UTF-8 bytes.
-      responses:
-        "200":
-          description: Precheck result
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SendPrecheckResponse" }
-              examples:
-                memoRequired:
-                  value:
-                    warnings:
-                      - code: MEMO_REQUIRED
-                        message: The destination requires a memo (SEP-29), e.g. an exchange deposit ID. Sending without one may lose funds.
-                        blocking: true
-                    blocking: true
-                    operationType: payment
-                    spendable: "98.4999900"
-                willCreate:
-                  value:
-                    warnings:
-                      - code: DESTINATION_WILL_BE_CREATED
-                        message: Destination account does not exist yet. It will be created and funded with this amount.
-                        blocking: false
-                    blocking: false
-                    operationType: createAccount
-                    spendable: "98.4999900"
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/send:
-    post:
-      summary: Send a payment (createAccount for unfunded XLM destinations, #65)
-      description: >-
-        If the destination does not exist and the asset is XLM with
-        amount >= 1, a `createAccount` operation is submitted instead of
-        `payment`. Otherwise an unfunded destination is rejected with
-        `DESTINATION_NOT_FUNDED` before anything is signed.
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Submitted
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  hash: { type: string }
-                  successful: { type: boolean }
-        "400":
-          description: Validation failure, MEMO_REQUIRED or DESTINATION_NOT_FUNDED
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              examples:
-                destinationNotFunded:
-                  value:
-                    code: DESTINATION_NOT_FUNDED
-                    error: Destination account GB... does not exist. Only XLM can be sent to a new account (at least 1 XLM, via createAccount).
-                    details:
-                      reason: NON_NATIVE_ASSET
-                      destination: GB...
-                      minimumStartingBalance: "1"
-                    retryable: false
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/partial-transaction:
-    post:
-      summary: Build and partially sign a send (createAccount for unfunded XLM destinations, #65)
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Partially signed transaction
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [xdr, hash, operationType]
-                properties:
-                  xdr: { type: string }
-                  hash: { type: string }
-                  operationType: { $ref: "#/components/schemas/SendOperationType" }
-        "400":
-          description: Validation failure or DESTINATION_NOT_FUNDED (reason NON_NATIVE_ASSET | BELOW_MINIMUM_STARTING_BALANCE)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/resolve:
-    get:
-      summary: Resolve a G..., M... or federation (SEP-2) address (#63)
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string, maxLength: 256 }
-          examples:
-            federation: { value: "alice*example.com" }
-            muxed: { value: "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUAAAAAAAAAAAACJUQ" }
-      responses:
-        "200":
-          description: Resolved account
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ResolvedAddress" }
-              examples:
-                federation:
-                  value: { type: federation, accountId: GB..., memo: "12345", memoType: id }
-                muxed:
-                  value: { type: muxed, accountId: GA7Q..., muxedId: "1234", muxedAddress: MA7Q... }
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Federation server has no record for the name
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_NOT_FOUND, error: Federation address alice*example.com was not found }
-        "502":
-          description: Domain has no stellar.toml / FEDERATION_SERVER, or it returned an invalid record
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_UNAVAILABLE, error: "Could not resolve alice*example.com: the domain has no reachable federation server", retryable: true }
-        "504":
-          description: Federation server did not answer within 3 seconds
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_TIMEOUT, error: Federation server for alice*example.com did not respond within 3000ms, retryable: true }
-
-  /api/v1/account/{publicKey}/transactions/export.csv:
-    get:
-      summary: Download payment history as CSV (#62)
-      description: >-
-        Streams a CSV statement of the account's payment-shaped operations
-        (payments, path payments, create_account, account_merge), newest
-        first. Columns: date, type, direction (in|out|self), amount, asset
-        ("XLM" or CODE:ISSUER), counterparty, memo, fee (XLM, only on rows
-        whose transaction this account paid for; repeated per operation in
-        multi-op transactions), hash. Cells starting with = + - @ are
-        prefixed with ' to prevent spreadsheet formula injection. If Horizon
-        fails mid-stream the connection is aborted rather than ending
-        cleanly, so a truncated file is detectable.
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: publicKey
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/AccountId" }
-        - name: from
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive start (ISO-8601). Defaults to 365 days before `to`.
-        - name: to
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive end (ISO-8601). Defaults to now. Range may not exceed 366 days.
-      responses:
-        "200":
-          description: CSV stream
-          content:
-            text/csv:
-              schema: { type: string }
-              example: |
-                date,type,direction,amount,asset,counterparty,memo,fee,hash
-                2026-03-01T10:00:00Z,payment,out,25.0000000,XLM,GB...,rent,0.0000100,ab12...
-        "400":
-          description: VALIDATION_ERROR, INVALID_EXPORT_RANGE or EXPORT_RANGE_TOO_LARGE
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: EXPORT_RANGE_TOO_LARGE, error: Export range must not exceed 1 year, details: { maxRangeDays: 366 } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Account not found
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: ACCOUNT_NOT_FOUND, error: Account GB... was not found on Horizon }
+      r
