@@ -7,6 +7,7 @@ import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
 import { priceRouter } from "./routes/price";
+import { createAssetsRouter } from "./routes/assets";
 import { authRouter } from "./routes/auth";
 import { cspReportRouter } from "./routes/cspReport";
 import { flagsRouter } from "./routes/flags";
@@ -113,6 +114,8 @@ export function createApp(
   app.use("/api/v1/account", createAccountRouter(stellar));
   app.use("/api/v1/contract", createContractRouter(globeWallet));
   app.use("/api/v1/price", priceRouter);
+  // #52, #53 — asset search and stellar.toml metadata for the add-asset flow
+  app.use("/api/v1/assets", createAssetsRouter());
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/flags", flagsRouter);
   // #87 — push notification device registration

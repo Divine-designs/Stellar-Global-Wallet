@@ -20,6 +20,40 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
+## Asset discovery and wallet reads
+
+OpenAPI entries for these live in [docs/openapi.yaml](docs/openapi.yaml).
+All are unauthenticated reads.
+
+| Route | What it returns |
+|---|---|
+| `GET /api/v1/assets/search?code=USDC[&limit&cursor]` | Horizon `/assets` page for the code; verified issuers first, then by trustline count (#53) |
+| `GET /api/v1/assets/search?domain=circle.com` | Assets the domain's stellar.toml lists whose issuer `home_domain` points back at it (#53) |
+| `GET /api/v1/assets/{code}/{issuer}` | `name`, `desc`, `image`, `decimals`, `homeDomain`, `orgName` from stellar.toml, plus a `status` (#52) |
+| `GET /api/v1/contract/wallet/guardians` | Guardian addresses (#51) |
+| `GET /api/v1/contract/wallet/recovery/config` | `{ threshold, delayInLedgers }` or `null` (#51) |
+| `GET /api/v1/contract/wallet/recovery/proposal` | Active proposal with approvals vs threshold and timelock ETA, or `null` (#51) |
+| `GET /api/v1/contract/wallet/recovery` | All three in one response (#51) |
+| `GET /api/v1/contract/wallet/{publicKey}/spend-allowance[/{assetCode}]` | `limit`, `spent`, `remaining`, `windowResetsAt` per asset (#50) |
+
+Notes:
+
+- **Verified assets** come from a small built-in list per network
+  (`src/services/verifiedAssets.ts`) plus `VERIFIED_ASSETS`
+  (comma-separated `CODE:ISSUER`). The activity feed's `unknown_asset` flag
+  reads the same variable.
+- **stellar.toml fetches** use https only, a 5s timeout and a 100KB cap,
+  and refuse hosts that resolve to private, loopback, link-local or other
+  non-public addresses, including on redirects. Results are cached in Redis
+  for 24h, or 1h when no metadata was found. A missing or malformed toml
+  returns `200` with null fields and a `status`, not an error.
+- **Spend windows** follow the contract: `ledger_timestamp / 86400`, so they
+  reset at 00:00:00 UTC by ledger close time. See
+  [docs/specs/spend-limits.md](../docs/specs/spend-limits.md).
+- The spend-allowance routes call the contract's new `get_spend_allowance`
+  view. Until the deployed contract is upgraded to include it, they return
+  `422 SOROBAN_SIMULATION_FAILED`.
+
 ## Contract event indexer
 
 The indexer polls Soroban RPC `getEvents` filtered by the wallet contract ID and

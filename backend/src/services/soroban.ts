@@ -50,7 +50,15 @@ export class SorobanService {
     const cached = await getCachedSimulate<T>(contractId, method, argsKey);
     if (cached !== null) return cached;
 
-    const sourceAccount = await this.server.getAccount(sourcePublicKey);
+    // Simulation never checks the source's sequence number, so a read with
+    // no natural caller (e.g. guardians(), #51) can use an account that
+    // doesn't exist on-chain — same fallback as buildUnsignedTransaction.
+    let sourceAccount: StellarSdk.Account;
+    try {
+      sourceAccount = await this.server.getAccount(sourcePublicKey);
+    } catch {
+      sourceAccount = new StellarSdk.Account(sourcePublicKey, "0");
+    }
     const tx = this.buildInvocation(sourceAccount, contractId, method, args);
 
     const sim = await this.server.simulateTransaction(tx);
