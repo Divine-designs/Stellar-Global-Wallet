@@ -13,10 +13,45 @@
 # more than 7 decimals and are documented separately (see `Price`).
 openapi: 3.1.0
 info:
-  title: GlobeWallet API — send flow & statements
-  version: "1.0"
+  title: Stellar Global Wallet API
+  version: 1.0.0
+  description: |
+    Backend API for the Stellar Global Wallet.
+
+    ## Error handling
+
+    All errors use a shared envelope with a stable `code` field. Clients should
+    branch on `code`, never on the human-readable `message`. The full catalogue
+    of codes — with HTTP status, retryability, when each occurs, and suggested
+    user-facing copy — lives in
+    [`docs/error-codes.md`](../docs/error-codes.md).
+
+    Regenerate the catalogue with `npm run docs:errors` after changing any code
+    in `src/errors/`, `src/services/stellarErrors.ts`,
+    `src/services/sorobanErrors.ts`, or `src/services/globeWalletErrors.ts`.
+
+    ### Error envelope
+
+    ```json
+    {
+      "error": {
+        "code": "REFRESH_TOKEN_INVALID",
+        "message": "Refresh token is invalid or expired",
+        "requestId": "b1e2c3d4-..."
+      }
+    }
+    ```
+
+    ### Retryable codes
+
+    Codes marked retryable in the catalogue (for example `LOGIN_RATE_LIMITED`
+    and Horizon/Soroban transient failures) may be retried with backoff. Codes
+    such as `REFRESH_TOKEN_INVALID` and `ROUTE_NOT_FOUND` are not retryable and
+    require the client to re-authenticate or correct the request.
 servers:
   - url: http://localhost:4000
+    description: Local development
+paths: {}
 components:
   securitySchemes:
     bearerAuth:
@@ -121,7 +156,9 @@ components:
           description: True when submitting as-is would fail on-chain or risk losing funds.
     SendPrecheckResponse:
       type: object
-      required: [warnings, blocking, operationType]
+      description: Shared error envelope returned by every endpoint on failure.
+      required:
+        - error
       properties:
         warnings:
           type: array

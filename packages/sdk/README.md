@@ -1,129 +1,98 @@
-# `@globe-wallet/sdk`
+# Stellar Global Wallet SDK
 
-Typed client for the GlobeWallet Soroban contracts. Works in Node, browsers
-and React Native — no Node-only modules in the runtime path.
+Typed, framework-agnostic client for the Stellar Global Wallet API. Works in Node,
+browsers and React Native (no Node-only modules in the runtime path).
 
 ## Install
 
 ```bash
-npm install @globe-wallet/sdk
+npm install @stellar-global-wallet/sdk
 ```
 
-## Usage
-
-### Quick start on testnet
+## Quick start
 
 ```ts
-import { createGlobeWalletClient } from "@globe-wallet/sdk";
+import { createClient, InMemoryTokenStore } from '@stellar-global-wallet/sdk';
 
-const client = createGlobeWalletClient("testnet", {
-  rpcUrl: "https://soroban-testnet.stellar.org",
-});
-
-const { result: assets } = await client.get_assets({
-  user: "GBLIQBXTAF3O3YINCRDR5O7H47QHHW5GFOYN4HAD6IKOSWD4LWKWWPHP",
-});
-console.log(assets); // AssetInfo[]
-```
-
-### Any network / custom contract ID
-
-```ts
-import { GlobeWalletClient } from "@globe-wallet/sdk";
-
-const client = new GlobeWalletClient({
-  contractId: "C...",
-  networkPassphrase: "Test SDF Network ; September 2015",
-  rpcUrl: "https://soroban-testnet.stellar.org",
+const client = createClient({
+  baseUrl: 'http://localhost:4000',
+  tokenStore: new InMemoryTokenStore(),
+  onSessionExpired: () => {
+    // refresh token expired or was revoked — send the user back to sign in
+  },
 });
 ```
 
-### Submitting a state-changing call
+## Token storage
 
-Read-only methods (e.g. `get_assets`, `admin`, `guardians`) resolve with a
-`result` straight from simulation. State-changing methods (e.g.
-`add_asset`, `record_spend`) return an `AssembledTransaction` — simulate it,
-have the user's wallet sign it, then send:
+The SDK never persists tokens itself. Supply a `TokenStore` that matches the
+storage rules of your platform:
 
 ```ts
-const tx = await client.add_asset({
-  user: "G...",
-  asset: { code: "USDC", issuer: "G..." },
-});
-await tx.signAndSend({ signTransaction: wallet.signTransaction });
-```
-
-### Validation (mirrors the backend's rules — #103)
-
-```ts
-import { isGAddress, isValidMemoText, isValidStellarAmount, memoTextMessage } from "@globe-wallet/sdk";
-
-isGAddress("GBLIQBXTAF3O3YINCRDR5O7H47QHHW5GFOYN4HAD6IKOSWD4LWKWWPHP"); // true
-isGAddress("MA7Q...");                                                  // false — muxed addresses aren't accepted
-
-// Stellar's memo limit is 28 *bytes*, not characters — isValidMemoText
-// checks the real UTF-8 byte length.
-isValidMemoText("a".repeat(28));  // true  (28 bytes)
-isValidMemoText("日".repeat(10)); // false (30 bytes, even though it's 10 characters)
-if (!isValidMemoText(memo)) throw new Error(memoTextMessage);
-
-isValidStellarAmount("12.5000001"); // true  (≤ 7 decimal places)
-isValidStellarAmount("12.50000001"); // false (8 decimal places)
-```
-
-### Formatting (#102)
-
-```ts
-import { formatAmount, formatAsset, parseAmount, shortAddress } from "@globe-wallet/sdk";
-
-formatAmount("1234.5000001", { locale: "en-US" }); // "1,234.5000001"
-formatAmount("1234.5", { locale: "de-DE", decimals: 2 }); // "1.234,50"
-parseAmount("1.234,5000001", { locale: "de-DE" }); // "1234.5000001" — ready for isValidStellarAmount / submission
-
-formatAsset("USDC", "GBLIQBXTAF3O3YINCRDR5O7H47QHHW5GFOYN4HAD6IKOSWD4LWKWWPHP"); // "USDC:GBLI…WPHP"
-shortAddress("GBLIQBXTAF3O3YINCRDR5O7H47QHHW5GFOYN4HAD6IKOSWD4LWKWWPHP"); // "GBLI…WPHP"
-```
-
-### Address-poisoning detection (#104)
-
-```ts
-import { detectLookalike, precheckDestination } from "@globe-wallet/sdk";
-
-// Before showing a send confirmation, check the destination against the
-// user's address book and recent counterparties:
-const match = precheckDestination(destinationAddress, contacts, recentCounterparties);
-if (match) {
-  // Warn: "This address looks similar to {match.matchedAgainst} — check carefully before sending."
+export interface TokenStore {
+  get(): Promise<AuthTokens | null> | AuthTokens | null;
+  set(tokens: AuthTokens): Promise<void> | void;
+  clear(): Promise<void> | void;
 }
 ```
 
-### Running the SDK's own tests
+`InMemoryTokenStore` is the default and is suitable for Node and short-lived
+sessions. It does **not** survive a reload.
 
-```bash
-npm test -w @globe-wallet/sdk          # unit tests (validate/format/security) — no network
-npm run test:smoke -w @globe-wallet/sdk  # against a live deployment, PREVIEW_API_URL required
+| Platform | Recommended store | Lifetime / rules |
+| --- | --- | --- |
+| Node (server, CLI) | `InMemoryTokenStore` | Process lifetime; re-authenticate on restart. |
+| Web | `localStorage` / `sessionStorage` adapter | Access tokens are short-lived (see `utils/jwt.ts`). Prefer `sessionStorage` unless the user opted into "stay signed in"; never store tokens in a cookie readable by third-party scripts. |
+| React Native | `expo-secure-store` adapter | Persist in the OS keychain/keystore. Clear on sign-out and on `onSessionExpired`. |
+
+Access tokens are short-lived by design. Refresh tokens rotate on every use, so
+the SDK refreshes them **single-flight**: all in-flight requests share one
+`refresh()` promise, and parallel `401 TOKEN_EXPIRED` responses trigger exactly
+one call to `/auth/refresh`.
+
+## Automatic refresh and retry
+
+When a request fails with `401` and error code `TOKEN_EXPIRED`, the SDK:
+
+1. awaits the shared single-flight `refresh()` (one call, no matter how many
+   requests are waiting),
+2. replays the original request once with the new access token.
+
+A plain `401 UNAUTHORIZED` is **not** retried — it surfaces to the caller.
+
+If the refresh token itself is expired or revoked, the SDK clears the
+`TokenStore` and invokes `onSessionExpired`, then rejects with a typed
+`SessionExpiredError`:
+
+```ts
+import { SessionExpiredError } from '@stellar-global-wallet/sdk';
+
+try {
+  await client.get('/wallets');
+} catch (err) {
+  if (err instanceof SessionExpiredError) {
+    // tokens were cleared; prompt the user to sign in again
+  }
+}
 ```
 
-The smoke suite is what `.github/workflows/sdk-smoke-nightly.yml` runs nightly against a configured `PREVIEW_API_URL` to catch drift between the deployed API and this SDK (#121) — it's excluded from the regular `npm test` run since it needs network access to a specific deployment.
+Requests aborted while waiting for a refresh reject with the abort reason and do
+not consume the refreshed token.
 
-## Where this comes from
+### Rate limiting and transient failures
 
-This package wraps the generated bindings in
-[`packages/bindings/globe-wallet`](../bindings/globe-wallet), which are
-regenerated straight from the deployed contract's on-chain spec by
-[`.github/workflows/contract-bindings.yml`](../../.github/workflows/contract-bindings.yml)
-whenever `contract/contracts/globe-wallet` changes. That CI job fails if the
-regenerated bindings differ from what's committed, so this SDK's public
-surface can never silently drift from the deployed contract.
+`429` and `503` responses are retried with exponential backoff plus jitter,
+honouring the `Retry-After` header when present. Non-idempotent `POST` requests
+are only retried when an `Idempotency-Key` header is supplied, so a retry can
+never create a duplicate resource.
 
-`token-wrapper` bindings are not included yet — it has no standalone testnet
-deployment to generate from. Add it the same way (new `--contract-id` /
-`--wasm` target in the CI job) once one exists.
+```ts
+await client.post('/transfers', body, {
+  headers: { 'Idempotency-Key': crypto.randomUUID() },
+});
+```
 
-## Releasing
+## Errors
 
-Versioning and publishing go through
-[Changesets](https://github.com/changesets/changesets) — run
-`npx changeset` to describe your change, then see
-[`.github/workflows/release.yml`](../../.github/workflows/release.yml) for
-how merges to `main` turn pending changesets into a published npm release.
+All failures reject with typed errors from the SDK error-code catalogue, so
+callers can branch on `code` instead of parsing messages.

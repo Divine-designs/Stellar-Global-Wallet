@@ -88,3 +88,13 @@ export * from "./format/index.js";
  * recent contact/counterparty but differ.
  */
 export * from "./security/index.js";
+
+/**
+ * Typed HTTP client for the backend REST API (#18), generated from
+ * `backend/openapi.yaml` via `openapi-typescript` and transported with
+ * `openapi-fetch`. Use `createClient({ baseUrl, getToken, onSessionExpired })`
+ * to get a fully typed client that injects the auth header and normalises
+ * the backend error envelope. Works in Node 20, browsers and React Native
+ * (no Node-only APIs in the runtime path).
+ */
+export * from "./client/index.js";
