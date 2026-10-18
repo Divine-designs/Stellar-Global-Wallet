@@ -70,6 +70,9 @@ pub enum DataKey {
 const LEDGERS_PER_DAY: u32 = 17_280; // ~86_400s / 5s average ledger close time
 const DAILY_SPENT_TTL_THRESHOLD: u32 = LEDGERS_PER_DAY;
 const DAILY_SPENT_TTL_EXTEND_TO: u32 = LEDGERS_PER_DAY * 2;
+/// Length of the `record_spend` day window. Windows are aligned to Unix
+/// time, so each one starts at 00:00:00 UTC by ledger close time.
+const SECONDS_PER_DAY: u64 = 86_400;
 
 /// `UserAssets` and `SpendLimit` are persistent entries without a natural
 /// time-based expiry (unlike `DailySpent`'s 86 400-second day window).
@@ -107,6 +110,31 @@ pub struct SpendRecord {
     pub amount: i128,
     /// Ledger-time timestamp of the current day window
     pub day: u64,
+}
+
+/// Read-only view of a user's daily spend window for one asset, returned by
+/// [`GlobeWallet::get_spend_allowance`] (issue #50).
+///
+/// The window is the same 86 400-second bucket `record_spend` uses:
+/// `day = ledger_timestamp / 86400`. Ledger timestamps are Unix seconds, so
+/// windows start and end exactly at 00:00:00 UTC *as measured by ledger
+/// close time*, not wall-clock time on any client or server.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpendAllowance {
+    /// Configured daily cap (0 = unlimited).
+    pub limit: i128,
+    /// Amount recorded in the current window. Always 0 when `limit == 0`,
+    /// because `record_spend` does not track spends for unlimited assets.
+    pub spent: i128,
+    /// `limit - spent`, floored at 0. 0 when `limit == 0` — callers must
+    /// check `limit` to distinguish "unlimited" from "nothing left".
+    pub remaining: i128,
+    /// Ledger timestamp (Unix seconds) at which the current window began.
+    pub window_start: u64,
+    /// Ledger timestamp (Unix seconds) at which the next window begins and
+    /// `spent` resets to 0.
+    pub window_resets_at: u64,
 }
 
 #[contracttype]
@@ -1232,6 +1260,48 @@ impl GlobeWallet {
             .persistent()
             .get(&DataKey::SpendLimit(user, asset_code))
             .unwrap_or(0)
+    }
+
+    /// Amount spent by `user` in `asset_code` during the current day window
+    /// (issue #50). Mirrors `record_spend`'s window logic exactly: a stored
+    /// record from an earlier `day` bucket counts as 0.
+    pub fn get_spent_today(env: Env, user: Address, asset_code: String) -> i128 {
+        let day = env.ledger().timestamp() / SECONDS_PER_DAY;
+        Self::spent_in_day(&env, &user, &asset_code, day)
+    }
+
+    /// Limit, spent and remaining amounts for the current day window, plus
+    /// the ledger timestamps bounding it (issue #50). Read-only; intended to
+    /// be simulated rather than submitted.
+    pub fn get_spend_allowance(env: Env, user: Address, asset_code: String) -> SpendAllowance {
+        let now = env.ledger().timestamp();
+        let day = now / SECONDS_PER_DAY;
+        let limit = Self::get_spend_limit(env.clone(), user.clone(), asset_code.clone());
+        let spent = Self::spent_in_day(&env, &user, &asset_code, day);
+        let remaining = if limit == 0 {
+            0
+        } else {
+            (limit - spent).max(0)
+        };
+        let window_start = day * SECONDS_PER_DAY;
+        SpendAllowance {
+            limit,
+            spent,
+            remaining,
+            window_start,
+            window_resets_at: window_start + SECONDS_PER_DAY,
+        }
+    }
+
+    fn spent_in_day(env: &Env, user: &Address, asset_code: &String, day: u64) -> i128 {
+        let record: Option<SpendRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DailySpent(user.clone(), asset_code.clone()));
+        match record {
+            Some(r) if r.day == day => r.amount,
+            _ => 0,
+        }
     }
 
     /// Record a spend and reject if it would exceed the daily limit.

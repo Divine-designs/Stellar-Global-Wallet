@@ -6,8 +6,8 @@ import { rateLimit } from "express-rate-limit";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
-import { createPriceRouter } from "./routes/price";
-import { assetsRouter } from "./routes/assets";
+import { priceRouter } from "./routes/price";
+import { createAssetsRouter } from "./routes/assets";
 import { authRouter } from "./routes/auth";
 import { cspReportRouter } from "./routes/cspReport";
 import { flagsRouter } from "./routes/flags";
@@ -15,6 +15,7 @@ import { devicesRouter } from "./routes/devices";
 import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
 import { createPendingTxRouter } from "./routes/pendingTx";
+import { createResolveRouter } from "./routes/resolve";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -114,11 +115,12 @@ export function createApp(
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));
   app.use("/api/v1/account", createAccountRouter(stellar));
+  // #63 — resolve G.../M.../federation (name*domain) addresses
+  app.use("/api/v1/resolve", createResolveRouter());
   app.use("/api/v1/contract", createContractRouter(globeWallet));
-  // #55/#56/#57 — spot, batch and historical USD prices
-  app.use("/api/v1/price", createPriceRouter(priceServices.prices, priceServices.history));
-  // #54 — curated verified-asset allowlist
-  app.use("/api/v1/assets", assetsRouter);
+  app.use("/api/v1/price", priceRouter);
+  // #52, #53 — asset search and stellar.toml metadata for the add-asset flow
+  app.use("/api/v1/assets", createAssetsRouter());
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/flags", flagsRouter);
   // #87 — push notification device registration

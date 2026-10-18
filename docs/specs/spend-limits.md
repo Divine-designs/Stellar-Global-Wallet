@@ -47,10 +47,22 @@ stateDiagram-v2
 
 ## Remaining and reset display
 
-- Remaining today = limit − spent today, floored at 0. Until the API exposes
-  today's spend directly, apps track it from successful sends since the last
-  reset and treat it as an estimate; the contract check is authoritative.
-- Reset time: next 00:00 UTC **converted to the device's time zone**, e.g.
+- Remaining today = limit − spent today, floored at 0. Read it from
+  `GET /api/v1/contract/wallet/{publicKey}/spend-allowance` (all whitelisted
+  assets) or `.../spend-allowance/{assetCode}` (one asset), which return
+  `limit`, `spent`, `remaining` and `windowResetsAt` straight from the
+  contract's `get_spend_allowance` view. It is a simulated read, up to one
+  ledger behind; the `record_spend` check is still authoritative.
+- `unlimited: true` means no limit is set; `remaining` is then `null` and
+  `spent` is always `"0"` because the contract does not track spends for
+  assets without a limit.
+- Window boundaries use **ledger close time**, not server or device clocks:
+  `day = ledger_timestamp / 86400`, so `windowStartsAt` and `windowResetsAt`
+  are always 00:00:00 UTC exactly. The first spend after `windowResetsAt` is
+  counted in the new window once a ledger with a later timestamp closes.
+  Ledger timestamps can trail wall-clock time by a few seconds, so near
+  midnight a send may still count against the old window.
+- Reset time: `windowResetsAt` **converted to the device's time zone**, e.g.
   "Resets at 1:00 AM (00:00 UTC)". Always show the UTC time alongside, since
   users east or west of UTC will see the reset mid-day.
 
@@ -89,6 +101,9 @@ still used" so the remaining amount does not surprise the user.
 
 ## API dependencies
 
-The backend currently exposes only `POST /api/v1/contract/wallet/spend`.
-Set, get and remaining-today endpoints wrapping `set_spend_limit` and
-`get_spend_limit` are needed before this screen can be built.
+- `POST /api/v1/contract/wallet/spend` — the limit check before a send.
+- `GET /api/v1/contract/wallet/{publicKey}/spend-allowance[/{assetCode}]` —
+  limit, spent, remaining and window bounds (issue #50).
+
+Still missing: an endpoint wrapping `set_spend_limit` (unsigned-XDR builder,
+issue #7).

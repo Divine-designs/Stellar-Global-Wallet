@@ -20,18 +20,36 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
-## Prices and verified assets
+## Send flow & statements
 
-| Route | What |
-|---|---|
-| `GET /api/v1/price/:asset` | USD spot price (`XLM` or `CODE:ISSUER`), Stellar DEX with CoinGecko fallback, cached 30 s |
-| `GET /api/v1/price?assets=XLM,USDC:G...` | Batch spot prices, up to 50 assets, duplicates collapsed |
-| `GET /api/v1/price/:asset/history?range=24h\|7d\|30d\|1y` | Fixed-size chart series from Horizon trade aggregations |
-| `GET /api/v1/assets/verified` | Maintainer-reviewed allowlist of genuine issued assets |
+OpenAPI: [docs/openapi.yaml](docs/openapi.yaml). All routes below need a bearer
+JWT; amounts are decimal strings (max 7 places), never JSON numbers.
 
-Details, gap handling and config: [docs/prices.md](docs/prices.md),
-[docs/verified-assets.md](docs/verified-assets.md). OpenAPI:
-[docs/openapi-prices-assets.yaml](docs/openapi-prices-assets.yaml).
+- **`POST /api/v1/wallet/send/precheck`** (#64) — read-only check before
+  signing. Body `{ sourcePublicKey, destinationPublicKey, amount, asset?, memo? }`
+  returns `{ warnings: [{ code, message, blocking }], blocking, operationType, spendable? }`.
+  Warning codes: `DESTINATION_IS_SOURCE`, `SOURCE_NOT_FUNDED`,
+  `DESTINATION_NOT_FUNDED`, `DESTINATION_WILL_BE_CREATED`, `NO_TRUSTLINE`,
+  `TRUSTLINE_NOT_AUTHORIZED`, `MEMO_REQUIRED` (SEP-29),
+  `AMOUNT_EXCEEDS_SPENDABLE`. Don't offer "Sign" while `blocking` is true.
+- **Unfunded destinations** (#65) — `POST /wallet/send` and
+  `POST /wallet/partial-transaction` automatically use `createAccount`
+  instead of `payment` when the destination doesn't exist, the asset is XLM
+  and the amount is at least 1 XLM. Any other send to an unfunded account
+  fails with `400 DESTINATION_NOT_FUNDED` (`details.reason`:
+  `NON_NATIVE_ASSET` or `BELOW_MINIMUM_STARTING_BALANCE`) before signing.
+  `partial-transaction` also returns `operationType`.
+- **`GET /api/v1/resolve?q=`** (#63) — resolves `G...` (as-is), `M...` muxed
+  addresses (`accountId` + `muxedId`) and SEP-2 federation addresses
+  (`alice*example.com` → `accountId`, plus `memo`/`memoType` if the server
+  returns one). Federation lookups time out after 3s (`504 FEDERATION_TIMEOUT`);
+  unknown names are `404 FEDERATION_NOT_FOUND`; a domain without a working
+  federation server is `502 FEDERATION_UNAVAILABLE`.
+- **`GET /api/v1/account/:publicKey/transactions/export.csv?from=&to=`** (#62)
+  — streams a CSV statement (`date,type,direction,amount,asset,counterparty,memo,fee,hash`).
+  `from`/`to` are ISO-8601, default to the last 365 days, max range 366 days
+  (`400 EXPORT_RANGE_TOO_LARGE`). Cells starting with `= + - @` are prefixed
+  with `'` to block spreadsheet formula injection.
 
 ## Contract event indexer
 
