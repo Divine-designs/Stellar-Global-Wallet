@@ -1,325 +1,70 @@
-# OpenAPI 3.1 paths for the send-flow and statement endpoints (#62–#65).
-#
-# The full spec for every /api/v1 route is tracked in issue #15; this file
-# covers the routes added/changed by #62, #63, #64 and #65 and reuses the
-# shared error envelope + examples from ./openapi-errors.yaml so it can be
-# merged into that spec unchanged.
 openapi: 3.1.0
 info:
-  title: GlobeWallet API — send flow & statements
-  version: "1.0"
+  title: Stellar Global Wallet API
+  version: 1.0.0
+  description: |
+    Backend API for the Stellar Global Wallet.
+
+    ## Error handling
+
+    All errors use a shared envelope with a stable `code` field. Clients should
+    branch on `code`, never on the human-readable `message`. The full catalogue
+    of codes — with HTTP status, retryability, when each occurs, and suggested
+    user-facing copy — lives in
+    [`docs/error-codes.md`](../docs/error-codes.md).
+
+    Regenerate the catalogue with `npm run docs:errors` after changing any code
+    in `src/errors/`, `src/services/stellarErrors.ts`,
+    `src/services/sorobanErrors.ts`, or `src/services/globeWalletErrors.ts`.
+
+    ### Error envelope
+
+    ```json
+    {
+      "error": {
+        "code": "REFRESH_TOKEN_INVALID",
+        "message": "Refresh token is invalid or expired",
+        "requestId": "b1e2c3d4-..."
+      }
+    }
+    ```
+
+    ### Retryable codes
+
+    Codes marked retryable in the catalogue (for example `LOGIN_RATE_LIMITED`
+    and Horizon/Soroban transient failures) may be retried with backoff. Codes
+    such as `REFRESH_TOKEN_INVALID` and `ROUTE_NOT_FOUND` are not retryable and
+    require the client to re-authenticate or correct the request.
 servers:
   - url: http://localhost:4000
+    description: Local development
+paths: {}
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
   schemas:
-    ErrorResponse:
-      $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse"
-    Amount:
-      type: string
-      pattern: '^\d+(\.\d{1,7})?$'
-      description: Positive decimal string, at most 7 decimal places. Never a JSON number.
-      example: "12.5"
-    AccountId:
-      type: string
-      pattern: "^G[A-Z2-7]{55}$"
-      description: Checksum-validated Stellar account ID (G...).
-    Asset:
-      type: string
-      description: '"XLM" or "CODE:ISSUER". Defaults to XLM when omitted.'
-      example: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
-    SendOperationType:
-      type: string
-      enum: [payment, createAccount]
-      description: >-
-        Operation the build path uses (#65). `createAccount` is chosen
-        automatically when the destination does not exist, the asset is XLM
-        and amount >= 1 XLM.
-    SendPrecheckWarning:
+    Error:
       type: object
-      required: [code, message, blocking]
+      description: Shared error envelope returned by every endpoint on failure.
+      required:
+        - error
       properties:
-        code:
-          type: string
-          enum:
-            - DESTINATION_IS_SOURCE
-            - SOURCE_NOT_FUNDED
-            - DESTINATION_NOT_FUNDED
-            - DESTINATION_WILL_BE_CREATED
-            - NO_TRUSTLINE
-            - TRUSTLINE_NOT_AUTHORIZED
-            - MEMO_REQUIRED
-            - AMOUNT_EXCEEDS_SPENDABLE
-        message:
-          type: string
-        blocking:
-          type: boolean
-          description: True when submitting as-is would fail on-chain or risk losing funds.
-    SendPrecheckResponse:
-      type: object
-      required: [warnings, blocking, operationType]
-      properties:
-        warnings:
-          type: array
-          items: { $ref: "#/components/schemas/SendPrecheckWarning" }
-        blocking:
-          type: boolean
-          description: True if any warning is blocking — do not offer "Sign".
-        operationType:
-          $ref: "#/components/schemas/SendOperationType"
-        spendable:
-          type: string
-          description: >-
-            Source's spendable balance of the asset (XLM: balance minus
-            minimum reserve, selling liabilities and one base fee). Omitted
-            when the source account does not exist.
-    ResolvedAddress:
-      type: object
-      required: [type, accountId]
-      properties:
-        type:
-          type: string
-          enum: [account, muxed, federation]
-        accountId:
-          $ref: "#/components/schemas/AccountId"
-        memo:
-          type: string
-          description: Memo returned by the federation server (federation only). Attach it to the payment.
-        memoType:
-          type: string
-          enum: [text, id, hash]
-        muxedId:
-          type: string
-          description: Muxed sub-account ID as a decimal string (muxed only).
-        muxedAddress:
-          type: string
-          description: The original M... address (muxed only).
-  responses:
-    ValidationError:
-      description: Input failed validation
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/ErrorResponse" }
-          examples:
-            invalid:
-              $ref: "./openapi-errors.yaml#/components/examples/BadRequest400"
-    Unauthorized:
-      description: Missing or invalid bearer token
-      content:
-        application/json:
-          schema: { $ref: "#/components/schemas/ErrorResponse" }
-          example:
-            code: AUTH_HEADER_INVALID
-            error: Missing or malformed Authorization header
-
-paths:
-  /api/v1/wallet/send/precheck:
-    post:
-      summary: Check a send for problems before signing (#64)
-      description: >-
-        Read-only. Loads the source and destination accounts and reports
-        every known reason the payment would fail or lose funds: destination
-        missing (and whether it would be created), missing/unauthorized
-        trustline, SEP-29 memo required, sending to yourself, and amount
-        above the spendable balance. A well-formed request always returns
-        200; problems come back as warnings.
-      security: [{ bearerAuth: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [sourcePublicKey, destinationPublicKey, amount]
-              properties:
-                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
-                destinationPublicKey: { $ref: "#/components/schemas/AccountId" }
-                amount: { $ref: "#/components/schemas/Amount" }
-                asset: { $ref: "#/components/schemas/Asset" }
-                memo:
-                  type: string
-                  description: MEMO_TEXT, at most 28 UTF-8 bytes.
-      responses:
-        "200":
-          description: Precheck result
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SendPrecheckResponse" }
+        error:
+          type: object
+          required:
+            - code
+            - message
+          properties:
+            code:
+              type: string
+              description: >-
+                Stable machine-readable error code. See
+                `docs/error-codes.md` for the full catalogue.
               examples:
-                memoRequired:
-                  value:
-                    warnings:
-                      - code: MEMO_REQUIRED
-                        message: The destination requires a memo (SEP-29), e.g. an exchange deposit ID. Sending without one may lose funds.
-                        blocking: true
-                    blocking: true
-                    operationType: payment
-                    spendable: "98.4999900"
-                willCreate:
-                  value:
-                    warnings:
-                      - code: DESTINATION_WILL_BE_CREATED
-                        message: Destination account does not exist yet. It will be created and funded with this amount.
-                        blocking: false
-                    blocking: false
-                    operationType: createAccount
-                    spendable: "98.4999900"
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/send:
-    post:
-      summary: Send a payment (createAccount for unfunded XLM destinations, #65)
-      description: >-
-        If the destination does not exist and the asset is XLM with
-        amount >= 1, a `createAccount` operation is submitted instead of
-        `payment`. Otherwise an unfunded destination is rejected with
-        `DESTINATION_NOT_FUNDED` before anything is signed.
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Submitted
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  hash: { type: string }
-                  successful: { type: boolean }
-        "400":
-          description: Validation failure, MEMO_REQUIRED or DESTINATION_NOT_FUNDED
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              examples:
-                destinationNotFunded:
-                  value:
-                    code: DESTINATION_NOT_FUNDED
-                    error: Destination account GB... does not exist. Only XLM can be sent to a new account (at least 1 XLM, via createAccount).
-                    details:
-                      reason: NON_NATIVE_ASSET
-                      destination: GB...
-                      minimumStartingBalance: "1"
-                    retryable: false
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/wallet/partial-transaction:
-    post:
-      summary: Build and partially sign a send (createAccount for unfunded XLM destinations, #65)
-      security: [{ bearerAuth: [] }]
-      responses:
-        "200":
-          description: Partially signed transaction
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [xdr, hash, operationType]
-                properties:
-                  xdr: { type: string }
-                  hash: { type: string }
-                  operationType: { $ref: "#/components/schemas/SendOperationType" }
-        "400":
-          description: Validation failure or DESTINATION_NOT_FUNDED (reason NON_NATIVE_ASSET | BELOW_MINIMUM_STARTING_BALANCE)
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-
-  /api/v1/resolve:
-    get:
-      summary: Resolve a G..., M... or federation (SEP-2) address (#63)
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: q
-          in: query
-          required: true
-          schema: { type: string, maxLength: 256 }
-          examples:
-            federation: { value: "alice*example.com" }
-            muxed: { value: "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUAAAAAAAAAAAACJUQ" }
-      responses:
-        "200":
-          description: Resolved account
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ResolvedAddress" }
-              examples:
-                federation:
-                  value: { type: federation, accountId: GB..., memo: "12345", memoType: id }
-                muxed:
-                  value: { type: muxed, accountId: GA7Q..., muxedId: "1234", muxedAddress: MA7Q... }
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Federation server has no record for the name
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_NOT_FOUND, error: Federation address alice*example.com was not found }
-        "502":
-          description: Domain has no stellar.toml / FEDERATION_SERVER, or it returned an invalid record
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_UNAVAILABLE, error: "Could not resolve alice*example.com: the domain has no reachable federation server", retryable: true }
-        "504":
-          description: Federation server did not answer within 3 seconds
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: FEDERATION_TIMEOUT, error: Federation server for alice*example.com did not respond within 3000ms, retryable: true }
-
-  /api/v1/account/{publicKey}/transactions/export.csv:
-    get:
-      summary: Download payment history as CSV (#62)
-      description: >-
-        Streams a CSV statement of the account's payment-shaped operations
-        (payments, path payments, create_account, account_merge), newest
-        first. Columns: date, type, direction (in|out|self), amount, asset
-        ("XLM" or CODE:ISSUER), counterparty, memo, fee (XLM, only on rows
-        whose transaction this account paid for; repeated per operation in
-        multi-op transactions), hash. Cells starting with = + - @ are
-        prefixed with ' to prevent spreadsheet formula injection. If Horizon
-        fails mid-stream the connection is aborted rather than ending
-        cleanly, so a truncated file is detectable.
-      security: [{ bearerAuth: [] }]
-      parameters:
-        - name: publicKey
-          in: path
-          required: true
-          schema: { $ref: "#/components/schemas/AccountId" }
-        - name: from
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive start (ISO-8601). Defaults to 365 days before `to`.
-        - name: to
-          in: query
-          schema: { type: string, format: date-time }
-          description: Inclusive end (ISO-8601). Defaults to now. Range may not exceed 366 days.
-      responses:
-        "200":
-          description: CSV stream
-          content:
-            text/csv:
-              schema: { type: string }
-              example: |
-                date,type,direction,amount,asset,counterparty,memo,fee,hash
-                2026-03-01T10:00:00Z,payment,out,25.0000000,XLM,GB...,rent,0.0000100,ab12...
-        "400":
-          description: VALIDATION_ERROR, INVALID_EXPORT_RANGE or EXPORT_RANGE_TOO_LARGE
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: EXPORT_RANGE_TOO_LARGE, error: Export range must not exceed 1 year, details: { maxRangeDays: 366 } }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "404":
-          description: Account not found
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/ErrorResponse" }
-              example: { code: ACCOUNT_NOT_FOUND, error: Account GB... was not found on Horizon }
+                - REFRESH_TOKEN_INVALID
+                - LOGIN_RATE_LIMITED
+                - ROUTE_NOT_FOUND
+            message:
+              type: string
+              description: Human-readable message for logs and debugging.
+            requestId:
+              type: string
+              description: Correlation id for support and tracing.

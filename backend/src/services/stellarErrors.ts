@@ -66,3 +66,29 @@ export class DestinationNotFundedError extends AppError {
     });
   }
 }
+
+/**
+ * #21 — user-facing copy for the Horizon result codes this service maps into
+ * `HORIZON_REJECTED` / `SEQUENCE_CONFLICT` errors. Kept next to the error
+ * classes so the catalogue in `docs/error-codes.md` stays in sync with the
+ * codes the backend actually emits. Messages avoid technical jargon.
+ */
+export const HORIZON_RESULT_CODE_MESSAGES: Record<string, string> = {
+  tx_bad_seq: "Something changed, please try again.",
+  tx_insufficient_fee: "The network fee was too low. Please try again.",
+  tx_insufficient_balance: "There isn't enough balance to cover this payment.",
+  tx_no_source_account: "We couldn't find the sending account. Please sign in again.",
+  tx_no_destination: "The receiving account doesn't exist yet.",
+  tx_too_late: "This request took too long and expired. Please try again.",
+  tx_too_early: "This request isn't valid yet. Please try again in a moment.",
+  tx_missing_operation: "The payment details were incomplete. Please try again.",
+  tx_bad_auth: "We couldn't confirm your authorization. Please sign in again.",
+  tx_bad_auth_extra: "We couldn't confirm your authorization. Please sign in again.",
+  op_underfunded: "There isn't enough balance to cover this payment.",
+  op_no_destination: "The receiving account doesn't exist yet.",
+  op_no_trust: "The receiving account can't hold this asset yet.",
+  op_line_full: "The receiving account can't hold any more of this asset.",
+  op_malformed: "The payment details were incomplete. Please try again.",
+  op_already_exists: "This account already exists.",
+  op_low_reserve: "This account needs a higher balance before it can do that.",
+};
