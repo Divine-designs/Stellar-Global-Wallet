@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
@@ -118,6 +120,32 @@ const envSchema = z.object({
   // the worker logs an alert because the retention gap means events were
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
+
+  // #26 — API versioning. The major version is the URL prefix (/api/v1);
+  // the minor version is the package.json version's minor component and is
+  // surfaced to clients via the X-API-Version response header. Clients older
+  // than MIN_CLIENT_VERSION are told to upgrade via /config. See
+  // docs/versioning.md for the full policy.
+  MIN_CLIENT_VERSION: z.string().min(1).default("1.0.0"),
 });
 
 export const config = envSchema.parse(process.env);
+
+// Read the package version once at boot. Resolved relative to this file so it
+// works both under ts-node (src/) and compiled output (dist/).
+function readPackageVersion(): string {
+  try {
+    const pkgPath = join(__dirname, "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version ?? "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+}
+
+const packageVersion = readPackageVersion();
+const [, packageMinor = "0"] = packageVersion.split(".");
+
+// API major version is fixed by the URL prefix; minor tracks package.json.
+export const API_MAJOR_VERSION = 1;
+export const API_VERSION = `${API_MAJOR_VERSION}.${packageMinor}`;

@@ -25,6 +25,7 @@ import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
+import { API_VERSION } from "./version";
 
 export function createApp(
   stellar: StellarService = new StellarService(),
@@ -40,6 +41,15 @@ export function createApp(
   // lets a client spoof their apparent IP if there's more than one real
   // proxy hop between them and this process.
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
+
+  // #26 — advertise the API version on every response so clients can log
+  // and detect drift. The value is derived from package.json (see
+  // src/version.ts) and follows the `1.<minor>` scheme documented in
+  // docs/versioning.md.
+  app.use((_req, res, next) => {
+    res.setHeader("X-API-Version", API_VERSION);
+    next();
+  });
 
   // helmet()'s defaults are tuned for a server rendering HTML (CSP that
   // still allows inline styles/scripts via nonces, X-Frame-Options, a
