@@ -137,6 +137,23 @@ const envSchema = z.object({
   // requests. Required when cookie mode is used — CORS with credentials must
   // never use `*`. Comma-separated; falls back to CORS_ORIGIN when unset.
   CORS_CREDENTIALS_ORIGINS: z.string().optional(),
+
+  // #35 — CSRF protection for cookie-based sessions. Double-submit token:
+  // GET /auth/csrf sets a non-httpOnly `gw_csrf` cookie; clients echo it in
+  // the `X-CSRF-Token` header on state-changing requests. The middleware
+  // compares header vs cookie for cookie-authenticated requests only
+  // (Bearer-authenticated requests are exempt) and also verifies the Origin
+  // header against the CORS allowlist. See src/middleware/csrf.ts.
+  //
+  // Name of the non-httpOnly double-submit cookie. Kept without the
+  // `__Host-` prefix so the browser can read it via document.cookie and echo
+  // it back in the header; it carries no secret on its own.
+  CSRF_COOKIE_NAME: z.string().min(1).default("gw_csrf"),
+  // Header the client must echo the cookie value in.
+  CSRF_HEADER_NAME: z.string().min(1).default("x-csrf-token"),
+  // Lifetime of the CSRF cookie in seconds. Short-lived; clients re-fetch
+  // from GET /auth/csrf when it expires.
+  CSRF_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
 });
 
 export const config = envSchema.parse(process.env);
