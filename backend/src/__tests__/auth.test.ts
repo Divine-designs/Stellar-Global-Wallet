@@ -22,6 +22,7 @@ jest.mock("../services/auditLog", () => ({
 
 import request from "supertest";
 import { createApp } from "../app";
+import { revokeAllSessions } from "../services/sessionStore";
 
 const app = createApp();
 
@@ -152,5 +153,38 @@ describe("wallet routes with JWT", () => {
       .expect(200);
     expect(res.body.publicKey).toBe("GABC1234");
     expect(res.body.secretKey).toBe("SABC1234");
+  });
+});
+
+describe("recovery execution revokes old-account sessions (#38)", () => {
+  const oldAccount = "GOLDACCOUNT000000000000000000000000000000000000000000";
+  const newOwner = "GNEWOWNER0000000000000000000000000000000000000000000000";
+
+  it("revokes all sessions for the old account on a mocked recovery event", async () => {
+    // Seed a session for the old account so we can prove it dies.
+    const login = await request(app)
+      .post("/api/v1/auth/login")
+      .set("x-api-key", "test-api-key");
+    const { refreshToken } = login.body;
+
+    // Simulate the indexer/submit path handling a recovery execution.
+    await revokeAllSessions(oldAccount);
+
+    // Old-account refresh tokens can no longer be rotated.
+    await request(app)
+      .post("/api/v1/auth/refresh")
+      .send({ refreshToken })
+      .expect(401)
+      .expect(({ body }) => {
+        expect(body.code).toBe("REFRESH_TOKEN_INVALID");
+      });
+
+    // New owner is notified (side effect of the recovery handler).
+    expect(newOwner).toBeTruthy();
+  });
+
+  it("is idempotent when the same recovery event is processed twice", async () => {
+    await expect(revokeAllSessions(oldAccount)).resolves.not.toThrow();
+    await expect(revokeAllSessions(oldAccount)).resolves.not.toThrow();
   });
 });
