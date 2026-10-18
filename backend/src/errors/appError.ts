@@ -50,6 +50,18 @@ export class UnauthorizedError extends AppError {
   }
 }
 
+export class ForbiddenError extends AppError {
+  constructor(message = "Forbidden", code = "FORBIDDEN", details?: unknown) {
+    super(message, { code, details, status: 403 });
+  }
+}
+
+export class AccountMismatchError extends ForbiddenError {
+  constructor(message = "Authenticated account does not match the requested account", details?: unknown) {
+    super(message, "ACCOUNT_MISMATCH", details);
+  }
+}
+
 export class PayloadTooLargeError extends AppError {
   constructor(message = "Request body exceeds the configured size limit") {
     super(message, { code: "PAYLOAD_TOO_LARGE", status: 413 });

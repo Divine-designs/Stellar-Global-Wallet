@@ -3,9 +3,12 @@ import { randomUUID } from "crypto";
 import { createClient, RedisClientType } from "redis";
 import { config } from "../config";
 
+export type AuthMethod = "api-key" | "sep10";
+
 interface TokenPayload {
   sub: string;
   type: "access" | "refresh";
+  auth_method?: AuthMethod;
 }
 
 interface RefreshRecord {
@@ -44,8 +47,10 @@ const REFRESH_KEY_PREFIX = "orbit-wal:refresh-token:";
 const SESSION_KEY_PREFIX = "orbit-wal:session:";
 const ACCOUNT_SESSIONS_KEY_PREFIX = "orbit-wal:account-sessions:";
 
-export function generateAccessToken(sub: string): string {
-  return jwt.sign({ sub, type: "access" } satisfies TokenPayload, config.JWT_SECRET, {
+export function generateAccessToken(sub: string, authMethod?: AuthMethod): string {
+  const payload: TokenPayload = { sub, type: "access" };
+  if (authMethod) payload.auth_method = authMethod;
+  return jwt.sign(payload, config.JWT_SECRET, {
     expiresIn: ACCESS_EXPIRY,
   });
 }
@@ -288,7 +293,7 @@ export async function rotateRefreshToken(
   const result = await getDefaultStore().rotate(oldToken, metadata);
   if (!result) return null;
   return {
-    accessToken: generateAccessToken(result.sub),
+    accessToken: generateAccessToken(result.sub, result.authMethod),
     refreshToken: result.token,
     sessionId: result.sessionId,
   };

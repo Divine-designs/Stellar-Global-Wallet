@@ -22,6 +22,7 @@ import { createResolveRouter } from "./routes/resolve";
 import { createNetworkRouter } from "./routes/network";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
+import { requireAccountMatch } from "./middleware/requireAccountMatch";
 import { config } from "./config";
 import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
@@ -40,6 +41,141 @@ function resolveRequestId(inbound: unknown): string {
     return inbound;
   }
   return crypto.randomUUID();
+}
+
+type HealthCheckStatus = "ok" | "degraded" | "down";
+
+interface DependencyCheck {
+  ok: boolean;
+  latencyMs: number;
+  skipped?: boolean;
+  error?: string;
+}
+
+interface HealthDetails {
+  status: HealthCheckStatus;
+  checks: {
+    horizon: DependencyCheck;
+    rpc: DependencyCheck;
+    postgres: DependencyCheck;
+    redis: DependencyCheck;
+  };
+}
+
+const HEALTH_CHECK_TIMEOUT_MS = 1500;
+const HEALTH_CACHE_TTL_MS = 10_000;
+
+async function timedCheck(
+  fn: (signal: AbortSignal) => Promise<unknown>
+): Promise<DependencyCheck> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
+  const start = Date.now();
+  try {
+    await fn(controller.signal);
+    return { ok: true, latencyMs: Date.now() - start };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      error: err instanceof Error ? err.name : "Error",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function skippedCheck(): DependencyCheck {
+  return { ok: true, latencyMs: 0, skipped: true };
+}
+
+async function checkHorizon(signal: AbortSignal): Promise<DependencyCheck> {
+  return timedCheck(async (s) => {
+    const res = await fetch(config.HORIZON_URL, { signal: s });
+    if (!res.ok) throw new Error(`Horizon responded ${res.status}`);
+  });
+}
+
+async function checkRpc(signal: AbortSignal): Promise<DependencyCheck> {
+  return timedCheck(async (s) => {
+    const res = await fetch(config.SOROBAN_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+      signal: s,
+    });
+    if (!res.ok) throw new Error(`RPC responded ${res.status}`);
+    const body = (await res.json()) as { result?: { status?: string } };
+    if (body.result?.status && body.result.status !== "healthy") {
+      throw new Error(`RPC status ${body.result.status}`);
+    }
+  });
+}
+
+async function checkPostgres(): Promise<DependencyCheck> {
+  // Postgres is only required when the lock backend is postgres.
+  if (config.LOCK_BACKEND !== "postgres") return skippedCheck();
+  return timedCheck(async () => {
+    const { pool } = await import("./db/pool");
+    await pool.query("SELECT 1");
+  });
+}
+
+async function checkRedis(): Promise<DependencyCheck> {
+  // Redis is only required when the lock backend is redis.
+  if (config.LOCK_BACKEND !== "redis") return skippedCheck();
+  return timedCheck(async () => {
+    const { redis } = await import("./db/redis");
+    await redis.ping();
+  });
+}
+
+async function runHealthChecks(): Promise<HealthDetails> {
+  const [horizon, rpc, postgres, redis] = await Promise.all([
+    checkHorizon(new AbortController().signal),
+    checkRpc(new AbortController().signal),
+    checkPostgres(),
+    checkRedis(),
+  ]);
+
+  const checks = { horizon, rpc, postgres, redis };
+  const required = [horizon, rpc, postgres, redis].filter((c) => !c.skipped);
+  const failed = required.filter((c) => !c.ok);
+
+  let status: HealthCheckStatus = "ok";
+  if (failed.length > 0) {
+    // Horizon/RPC are core dependencies; if either is down the app is down.
+    const coreDown = !horizon.ok || !rpc.ok;
+    status = coreDown ? "down" : "degraded";
+  }
+
+  return { status, checks };
+}
+
+/**
+ * Resolves the account a request targets for the account-match guard.
+ * Checks common locations (body/query/params) for a source/account field.
+ * Returns undefined when the request does not target a specific account.
+ */
+function resolveTargetAccount(req: express.Request): string | undefined {
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = req.query as Record<string, unknown>;
+  const params = req.params as Record<string, unknown>;
+  const candidates = [
+    body.sourceAccount,
+    body.source,
+    body.account,
+    body.publicKey,
+    body.guardian,
+    query.sourceAccount,
+    query.account,
+    params.account,
+    params.publicKey,
+  ];
+  for (const value of candidates) {
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
 }
 
 export function createApp(
@@ -122,8 +258,8 @@ export function createApp(
   app.use("/api/v1/wallet/fee-bump", express.json({ limit: "64kb" }));
   app.use("/api/v1/wallet/submit-multisig", express.json({ limit: "64kb" }));
   // #74 — pending multisig store: create/add-signature/submit all carry an
-  // XDR envelope (plus a signature), so they need the same larger limit.
-  app.use("/api/v1/pending-txs", express.json({ limit: "64kb" }));
+  // XDR envelope (plus a signature), so they need the larger limit too.
+  app.use("/api/v1/wallet/pending-multisig", express.json({ limit: "64kb" }));
   app.use(express.json({ limit: "10kb" }));
 
   // #22 — every non-2xx response must use the shared error envelope
@@ -290,6 +426,7 @@ export function createApp(
   // #52, #53 — asset search and stellar.toml metadata for the add-asset flow
   app.use("/api/v1/assets", createAssetsRouter());
   app.use("/api/v1/auth", authRouter);
+  app.use("/api/v1/csp-report", cspReportRouter);
   app.use("/api/v1/flags", flagsRouter);
   // #87 — push notification device registration
   app.use("/api/v1/me/devices", devicesRouter);
@@ -311,13 +448,8 @@ export function createApp(
     app.use("/api/v1/dev", createDevRouter());
   }
 
-  app.use((req, _res, next) => {
-    next(
-      new NotFoundError(
-        `Route ${req.method} ${req.originalUrl} was not found`,
-        "ROUTE_NOT_FOUND"
-      )
-    );
+  app.use((_req, _res, next) => {
+    next(new NotFoundError("Route not found"));
   });
 
   app.use(errorHandler);
