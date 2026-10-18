@@ -3,22 +3,28 @@ import { randomUUID } from "crypto";
 import { createClient, RedisClientType } from "redis";
 import { config } from "../config";
 
+export type AuthMethod = "api-key" | "sep10";
+
 interface TokenPayload {
   sub: string;
   type: "access" | "refresh";
+  auth_method?: AuthMethod;
 }
 
 interface RefreshRecord {
   sub: string;
   revoked: boolean;
+  authMethod?: AuthMethod;
 }
 
 const ACCESS_EXPIRY = "15m";
 const REFRESH_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 const REFRESH_KEY_PREFIX = "orbit-wal:refresh-token:";
 
-export function generateAccessToken(sub: string): string {
-  return jwt.sign({ sub, type: "access" } satisfies TokenPayload, config.JWT_SECRET, {
+export function generateAccessToken(sub: string, authMethod?: AuthMethod): string {
+  const payload: TokenPayload = { sub, type: "access" };
+  if (authMethod) payload.auth_method = authMethod;
+  return jwt.sign(payload, config.JWT_SECRET, {
     expiresIn: ACCESS_EXPIRY,
   });
 }
@@ -59,17 +65,20 @@ export class RedisRefreshTokenStore {
     await this.connectPromise;
   }
 
-  async generate(sub: string): Promise<string> {
+  async generate(sub: string, authMethod?: AuthMethod): Promise<string> {
     await this.ensureConnected();
     const token = randomUUID();
     const record: RefreshRecord = { sub, revoked: false };
+    if (authMethod) record.authMethod = authMethod;
     await this.client.set(this.key(token), JSON.stringify(record), {
       PX: REFRESH_EXPIRY_MS,
     });
     return token;
   }
 
-  async rotate(oldToken: string): Promise<{ sub: string; token: string } | null> {
+  async rotate(
+    oldToken: string
+  ): Promise<{ sub: string; token: string; authMethod?: AuthMethod } | null> {
     await this.ensureConnected();
     const raw = await this.client.get(this.key(oldToken));
     if (!raw) return null;
@@ -77,8 +86,8 @@ export class RedisRefreshTokenStore {
     if (record.revoked) return null;
 
     await this.client.del(this.key(oldToken));
-    const token = await this.generate(record.sub);
-    return { sub: record.sub, token };
+    const token = await this.generate(record.sub, record.authMethod);
+    return { sub: record.sub, token, authMethod: record.authMethod };
   }
 
   async revoke(token: string): Promise<void> {
@@ -114,8 +123,11 @@ function getDefaultStore(): RedisRefreshTokenStore {
   return defaultStore;
 }
 
-export async function generateRefreshToken(sub: string): Promise<string> {
-  return getDefaultStore().generate(sub);
+export async function generateRefreshToken(
+  sub: string,
+  authMethod?: AuthMethod
+): Promise<string> {
+  return getDefaultStore().generate(sub, authMethod);
 }
 
 export async function rotateRefreshToken(
@@ -124,7 +136,7 @@ export async function rotateRefreshToken(
   const result = await getDefaultStore().rotate(oldToken);
   if (!result) return null;
   return {
-    accessToken: generateAccessToken(result.sub),
+    accessToken: generateAccessToken(result.sub, result.authMethod),
     refreshToken: result.token,
   };
 }

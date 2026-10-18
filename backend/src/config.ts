@@ -124,6 +124,29 @@ const envSchema = z.object({
   // can tune without a deploy; defaults keep the endpoint under ~2s.
   HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
   HEALTH_CACHE_TTL_MS: z.coerce.number().int().min(0).default(10000),
+
+  // #32 — SEP-10 Web Authentication. Users prove control of their Stellar
+  // account by signing a server-issued challenge, and the API issues a JWT
+  // with `sub = account` instead of the shared API_KEY identity.
+  //
+  // Secret key (S...) of the server account that signs challenges. Optional
+  // so the API can still boot without it; /auth/challenge and /auth/token
+  // respond 503 until set.
+  SEP10_SIGNING_SECRET: z
+    .string()
+    .regex(
+      /^S[A-Z2-7]{55}$/,
+      "must be a valid Stellar secret key (S followed by 55 base32 characters)"
+    )
+    .optional(),
+  // Home domain of the service, embedded in the challenge's manage_data
+  // name ("<HOME_DOMAIN> auth") per SEP-10.
+  HOME_DOMAIN: z.string().min(1).default("globewallet.app"),
+  // Value of the challenge's web_auth_domain operation, and the domain
+  // advertised in stellar.toml. Defaults to HOME_DOMAIN when unset.
+  WEB_AUTH_DOMAIN: z.string().min(1).optional(),
+  // How long a challenge stays valid, in seconds (SEP-10 recommends 300).
+  SEP10_CHALLENGE_TTL_SECONDS: z.coerce.number().int().positive().default(300),
 });
 
 export const config = envSchema.parse(process.env);
