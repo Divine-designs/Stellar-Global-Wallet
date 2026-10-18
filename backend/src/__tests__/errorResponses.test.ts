@@ -8,6 +8,7 @@ function createMockStellar(overrides: Record<string, unknown> = {}): StellarServ
   return {
     buildPartialTransaction: jest.fn(),
     feeBumpTransaction: jest.fn(),
+    feeStats: jest.fn(),
     findStrictReceivePaths: jest.fn(),
     findStrictSendPaths: jest.fn(),
     generateKeypair: jest.fn(),

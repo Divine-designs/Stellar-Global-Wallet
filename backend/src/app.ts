@@ -17,6 +17,7 @@ import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
 import { createPendingTxRouter } from "./routes/pendingTx";
 import { createResolveRouter } from "./routes/resolve";
+import { createNetworkRouter } from "./routes/network";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -134,6 +135,8 @@ export function createApp(
   const configRouter = createConfigRouter(globeWallet);
   app.use("/api/v1/config", configRouter);
   app.use("/config", configRouter);
+  // #13 — fee estimate (low/normal/high) from Horizon fee_stats, cached
+  app.use("/api/v1/network", createNetworkRouter());
 
   // #69 — testnet-only Friendbot funding for one-click onboarding. The
   // router is only mounted when the configured network is testnet, so on
