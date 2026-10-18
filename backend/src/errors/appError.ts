@@ -1,3 +1,8 @@
+import type { ErrorCode } from "./codes";
+
+export type { ErrorCode } from "./codes";
+export { ERROR_CODES, isErrorCode } from "./codes";
+
 export interface ValidationIssue {
   location?: string;
   message: string;
@@ -7,14 +12,14 @@ export interface ValidationIssue {
 }
 
 export interface AppErrorOptions {
-  code: string;
+  code: ErrorCode;
   details?: unknown;
   retryable?: boolean;
   status: number;
 }
 
 export class AppError extends Error {
-  readonly code: string;
+  readonly code: ErrorCode;
   readonly details?: unknown;
   readonly retryable?: boolean;
   readonly status: number;
@@ -27,6 +32,17 @@ export class AppError extends Error {
     this.retryable = options.retryable;
     this.status = options.status;
   }
+
+  /**
+   * Whether the caller should retry the request. Falls back to the HTTP
+   * status when the mapper did not set an explicit `retryable` flag.
+   */
+  isRetryable(): boolean {
+    if (typeof this.retryable === "boolean") {
+      return this.retryable;
+    }
+    return this.status === 429 || this.status >= 500;
+  }
 }
 
 export class InternalServerError extends AppError {
@@ -36,13 +52,13 @@ export class InternalServerError extends AppError {
 }
 
 export class NotFoundError extends AppError {
-  constructor(message = "Not found", code = "NOT_FOUND", details?: unknown) {
+  constructor(message = "Not found", code: ErrorCode = "NOT_FOUND", details?: unknown) {
     super(message, { code, details, status: 404 });
   }
 }
 
 export class UnauthorizedError extends AppError {
-  constructor(message = "Unauthorized", code = "UNAUTHORIZED", details?: unknown) {
+  constructor(message = "Unauthorized", code: ErrorCode = "UNAUTHORIZED", details?: unknown) {
     super(message, { code, details, status: 401 });
   }
 }
@@ -63,7 +79,7 @@ export class ValidationError extends AppError {
 }
 
 export class Sep7Error extends AppError {
-  constructor(message: string, code = "SEP7_INVALID_URI", details?: unknown) {
+  constructor(message: string, code: ErrorCode = "SEP7_INVALID_URI", details?: unknown) {
     super(message, { code, details, status: 400 });
   }
 }
@@ -72,7 +88,7 @@ export class HorizonError extends AppError {
   constructor(
     message: string,
     options: {
-      code: string;
+      code: ErrorCode;
       details?: unknown;
       retryable?: boolean;
       status?: number;
