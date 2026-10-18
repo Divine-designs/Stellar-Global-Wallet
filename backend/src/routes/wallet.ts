@@ -5,8 +5,13 @@ import { assertValidRequest } from "../middleware/requestValidation";
 import { logKeypairIssuance } from "../services/auditLog";
 import { StellarService } from "../services/stellar";
 import { isGAddress, publicKeyMessage, destinationMessage } from "../utils/stellarAddress";
-import { validatePathAssets } from "../validation/stellarAsset";
-import { isValidMemoText, memoTextMessage } from "@globe-wallet/sdk";
+import { isValidIssuedAsset, validatePathAssets } from "../validation/stellarAsset";
+import {
+  amountMessage,
+  isValidMemoText,
+  isValidStellarAmount,
+  memoTextMessage,
+} from "@globe-wallet/sdk";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { getCachedResult, cacheResult } from "../services/idempotency";
 
@@ -199,6 +204,46 @@ export function createWalletRouter(stellar: StellarService): Router {
     body("idempotencyKey").optional().isString().isLength({ max: 255 }),
     (req, res, next) =>
       handleIdempotentRequest(req, res, next, req.body.sourceSecretKey, () => stellar.sendPayment(req.body))
+  );
+
+  // #64 — read-only pre-signing checks. Takes the source *public* key (the
+  // client hasn't signed anything yet) and returns every reason the send
+  // would fail or lose funds, so the UI can warn before the user signs.
+  // Always 200 for a well-formed request; problems come back as warnings.
+  walletRouter.post(
+    "/send/precheck",
+    body("sourcePublicKey")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    body("destinationPublicKey")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(destinationMessage),
+    body("amount").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("asset")
+      .optional()
+      .custom((asset: unknown) => asset === "XLM" || isValidIssuedAsset(asset))
+      .withMessage('asset must be "XLM" or CODE:ISSUER'),
+    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { sourcePublicKey, destinationPublicKey, amount, asset, memo } = req.body;
+        const result = await stellar.precheckSend({
+          sourcePublicKey,
+          destinationPublicKey,
+          amount,
+          asset,
+          memo,
+        });
+        res.json(result);
+      } catch (err) {
+        next(err);
+      }
+    }
   );
 
   walletRouter.post(
