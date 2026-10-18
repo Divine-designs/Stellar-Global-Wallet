@@ -26,6 +26,115 @@ import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
+type HealthCheckStatus = "ok" | "degraded" | "down";
+
+interface DependencyCheck {
+  ok: boolean;
+  latencyMs: number;
+  skipped?: boolean;
+  error?: string;
+}
+
+interface HealthDetails {
+  status: HealthCheckStatus;
+  checks: {
+    horizon: DependencyCheck;
+    rpc: DependencyCheck;
+    postgres: DependencyCheck;
+    redis: DependencyCheck;
+  };
+}
+
+const HEALTH_CHECK_TIMEOUT_MS = 1500;
+const HEALTH_CACHE_TTL_MS = 10_000;
+
+async function timedCheck(
+  fn: (signal: AbortSignal) => Promise<unknown>
+): Promise<DependencyCheck> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS);
+  const start = Date.now();
+  try {
+    await fn(controller.signal);
+    return { ok: true, latencyMs: Date.now() - start };
+  } catch (err) {
+    return {
+      ok: false,
+      latencyMs: Date.now() - start,
+      error: err instanceof Error ? err.name : "Error",
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function skippedCheck(): DependencyCheck {
+  return { ok: true, latencyMs: 0, skipped: true };
+}
+
+async function checkHorizon(signal: AbortSignal): Promise<DependencyCheck> {
+  return timedCheck(async (s) => {
+    const res = await fetch(config.HORIZON_URL, { signal: s });
+    if (!res.ok) throw new Error(`Horizon responded ${res.status}`);
+  });
+}
+
+async function checkRpc(signal: AbortSignal): Promise<DependencyCheck> {
+  return timedCheck(async (s) => {
+    const res = await fetch(config.SOROBAN_RPC_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getHealth" }),
+      signal: s,
+    });
+    if (!res.ok) throw new Error(`RPC responded ${res.status}`);
+    const body = (await res.json()) as { result?: { status?: string } };
+    if (body.result?.status && body.result.status !== "healthy") {
+      throw new Error(`RPC status ${body.result.status}`);
+    }
+  });
+}
+
+async function checkPostgres(): Promise<DependencyCheck> {
+  // Postgres is only required when the lock backend is postgres.
+  if (config.LOCK_BACKEND !== "postgres") return skippedCheck();
+  return timedCheck(async () => {
+    const { pool } = await import("./db/pool");
+    await pool.query("SELECT 1");
+  });
+}
+
+async function checkRedis(): Promise<DependencyCheck> {
+  // Redis is only required when the lock backend is redis.
+  if (config.LOCK_BACKEND !== "redis") return skippedCheck();
+  return timedCheck(async () => {
+    const { redis } = await import("./db/redis");
+    await redis.ping();
+  });
+}
+
+async function runHealthChecks(): Promise<HealthDetails> {
+  const [horizon, rpc, postgres, redis] = await Promise.all([
+    checkHorizon(new AbortController().signal),
+    checkRpc(new AbortController().signal),
+    checkPostgres(),
+    checkRedis(),
+  ]);
+
+  const checks = { horizon, rpc, postgres, redis };
+  const required = [horizon, rpc, postgres, redis].filter((c) => !c.skipped);
+  const failed = required.filter((c) => !c.ok);
+
+  let status: HealthCheckStatus = "ok";
+  if (failed.length > 0) {
+    // Horizon/RPC are core dependencies; if either is down the app is down.
+    const coreDown = !horizon.ok || !rpc.ok;
+    status = coreDown ? "down" : "degraded";
+  }
+
+  return { status, checks };
+}
+
 export function createApp(
   stellar: StellarService = new StellarService(),
   globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
@@ -104,6 +213,20 @@ export function createApp(
 
   // Health
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
+
+  // #30 — detailed health: per-dependency status + latency, cached for 10s.
+  let healthCache: { at: number; value: HealthDetails } | null = null;
+  app.get("/api/v1/health/details", async (_req, res, next) => {
+    try {
+      const now = Date.now();
+      if (!healthCache || now - healthCache.at > HEALTH_CACHE_TTL_MS) {
+        healthCache = { at: now, value: await runHealthChecks() };
+      }
+      res.json(healthCache.value);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // Unversioned and unauthenticated: this is where a browser enforcing
   // the Content-Security-Policy documented in docs/security/csp.md sends

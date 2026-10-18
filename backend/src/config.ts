@@ -118,6 +118,12 @@ const envSchema = z.object({
   // the worker logs an alert because the retention gap means events were
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
+
+  // #30 — GET /api/v1/health/details. Per-dependency probe timeout (ms) and
+  // how long the aggregated result is cached (ms). Kept configurable so ops
+  // can tune without a deploy; defaults keep the endpoint under ~2s.
+  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
+  HEALTH_CACHE_TTL_MS: z.coerce.number().int().min(0).default(10000),
 });
 
 export const config = envSchema.parse(process.env);
