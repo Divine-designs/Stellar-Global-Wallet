@@ -9,6 +9,8 @@ import {
   SequenceConflictError,
 } from "./stellarErrors";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
+import { PaymentFlag, computePaymentFlags, parseVerifiedAssetsList } from "./paymentFlags";
+import { verifiedAssetKeys } from "./verifiedAssets";
 
 // Re-exported for backward compatibility — this used to be declared locally
 // here. The canonical definition now lives in packages/types (issue #107)
@@ -169,7 +171,11 @@ export class StellarService {
     const records = await builder.call();
 
     const dustThreshold = config.SPAM_DUST_THRESHOLD;
-    const verifiedAssets = parseVerifiedAssetsList(config.VERIFIED_ASSETS);
+    // Curated list (#54) plus any per-deployment VERIFIED_ASSETS additions.
+    const verifiedAssets = new Set([
+      ...verifiedAssetKeys(),
+      ...parseVerifiedAssetsList(config.VERIFIED_ASSETS),
+    ]);
 
     const payments: PaymentHistoryItem[] = await Promise.all(
       records.records.map(async (op) => {

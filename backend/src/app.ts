@@ -6,7 +6,8 @@ import { rateLimit } from "express-rate-limit";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
-import { priceRouter } from "./routes/price";
+import { createPriceRouter } from "./routes/price";
+import { assetsRouter } from "./routes/assets";
 import { authRouter } from "./routes/auth";
 import { cspReportRouter } from "./routes/cspReport";
 import { flagsRouter } from "./routes/flags";
@@ -21,10 +22,12 @@ import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
+import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
 export function createApp(
   stellar: StellarService = new StellarService(),
-  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService())
+  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
+  priceServices: { prices: PriceService; history: PriceHistoryService } = createDefaultPriceServices()
 ) {
   const app = express();
 
@@ -112,7 +115,10 @@ export function createApp(
   app.use("/api/v1/wallet", createWalletRouter(stellar));
   app.use("/api/v1/account", createAccountRouter(stellar));
   app.use("/api/v1/contract", createContractRouter(globeWallet));
-  app.use("/api/v1/price", priceRouter);
+  // #55/#56/#57 — spot, batch and historical USD prices
+  app.use("/api/v1/price", createPriceRouter(priceServices.prices, priceServices.history));
+  // #54 — curated verified-asset allowlist
+  app.use("/api/v1/assets", assetsRouter);
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/flags", flagsRouter);
   // #87 — push notification device registration

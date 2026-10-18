@@ -82,6 +82,24 @@ const envSchema = z.object({
   // flagged "unknown_asset" until explicitly added here.
   VERIFIED_ASSETS: z.string().default(""),
 
+  // Which network this deployment talks to. Selects the curated verified-
+  // asset list (backend/data/verified-assets.<network>.json, #54), the
+  // default USDC issuer used as the USD quote asset for prices (#55), and
+  // whether testnet-only routes (Friendbot, #69) are mounted.
+  STELLAR_NETWORK: z.enum(["testnet", "mainnet"]).default("testnet"),
+
+  // #55 — price oracle. Comma-separated provider order; the first provider
+  // that returns a price for an asset wins, later ones are fallbacks.
+  PRICE_PROVIDERS: z.string().default("stellar_dex,coingecko"),
+  // TTL for spot prices (single and batch lookups share one cache).
+  PRICE_CACHE_TTL_SECONDS: z.coerce.number().int().positive().default(30),
+  // Issuer of the USDC asset used as the USD quote on the Stellar DEX.
+  // Defaults to Circle's issuer for STELLAR_NETWORK (see services/price/usdQuote.ts).
+  PRICE_USDC_ISSUER: z.string().optional(),
+  COINGECKO_BASE_URL: z.string().url().default("https://api.coingecko.com/api/v3"),
+  // Optional CoinGecko demo/pro API key, sent as x-cg-demo-api-key.
+  COINGECKO_API_KEY: z.string().optional(),
+
   // #77 — contract event indexer. The worker polls Soroban RPC getEvents
   // filtered by GLOBE_WALLET_CONTRACT_ID and persists a cursor in the
   // indexer_state table so restarts resume where they left off. These knobs

@@ -20,6 +20,19 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
+## Prices and verified assets
+
+| Route | What |
+|---|---|
+| `GET /api/v1/price/:asset` | USD spot price (`XLM` or `CODE:ISSUER`), Stellar DEX with CoinGecko fallback, cached 30 s |
+| `GET /api/v1/price?assets=XLM,USDC:G...` | Batch spot prices, up to 50 assets, duplicates collapsed |
+| `GET /api/v1/price/:asset/history?range=24h\|7d\|30d\|1y` | Fixed-size chart series from Horizon trade aggregations |
+| `GET /api/v1/assets/verified` | Maintainer-reviewed allowlist of genuine issued assets |
+
+Details, gap handling and config: [docs/prices.md](docs/prices.md),
+[docs/verified-assets.md](docs/verified-assets.md). OpenAPI:
+[docs/openapi-prices-assets.yaml](docs/openapi-prices-assets.yaml).
+
 ## Contract event indexer
 
 The indexer polls Soroban RPC `getEvents` filtered by the wallet contract ID and

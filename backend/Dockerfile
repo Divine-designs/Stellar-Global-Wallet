@@ -29,6 +29,8 @@ COPY backend/package.json ./backend/package.json
 RUN npm install --omit=dev
 
 COPY --from=build /app/backend/dist ./backend/dist
+# Curated verified-asset lists (#54), read at runtime from backend/data.
+COPY backend/data ./backend/data
 
 EXPOSE 4000
 CMD ["node", "backend/dist/index.js"]

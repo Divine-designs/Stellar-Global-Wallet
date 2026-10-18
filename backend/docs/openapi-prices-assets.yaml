@@ -1,0 +1,146 @@
+# OpenAPI 3.1 entries for the price and verified-asset routes (#54, #55,
+# #56, #57). Like openapi-errors.yaml this is a fragment, written to be
+# merged into the full spec once #15 lands; error responses reference the
+# shared envelope and examples in openapi-errors.yaml.
+openapi: 3.1.0
+info:
+  title: GlobeWallet API — prices and verified assets
+  version: "1.0"
+paths:
+  /api/v1/price:
+    get:
+      summary: Batch USD spot prices
+      description: >
+        Up to 50 comma-separated assets. Duplicates are removed (first
+        occurrence order is kept). Any malformed entry rejects the whole
+        request. Public, no authentication.
+      parameters:
+        - name: assets
+          in: query
+          required: true
+          schema: { type: string, example: "XLM,USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" }
+      responses:
+        "200":
+          description: One quote per distinct asset.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [currency, prices]
+                properties:
+                  currency: { type: string, const: USD }
+                  prices: { type: array, items: { $ref: "#/components/schemas/PriceQuote" } }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/price/{asset}:
+    get:
+      summary: USD spot price for one asset
+      parameters:
+        - $ref: "#/components/parameters/Asset"
+      responses:
+        "200":
+          description: Spot quote. `price` is null with `source = unavailable` when no provider can price the asset.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceQuote" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/price/{asset}/history:
+    get:
+      summary: Historical USD price series for charts
+      parameters:
+        - $ref: "#/components/parameters/Asset"
+        - name: range
+          in: query
+          required: false
+          schema: { type: string, enum: ["24h", "7d", "30d", "1y"], default: "7d" }
+      responses:
+        "200":
+          description: Fixed-size series (24 / 168 / 180 / 183 points), oldest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceHistory" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "502":
+          description: Horizon trade aggregations unavailable (`PRICE_HISTORY_UNAVAILABLE`, retryable).
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+  /api/v1/assets/verified:
+    get:
+      summary: Maintainer-reviewed allowlist of issued assets
+      description: >
+        Match on both `code` and `issuer`. Native XLM is always trusted and
+        is not listed. Public, no authentication.
+      responses:
+        "200":
+          description: Verified assets for the configured network.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [network, assets]
+                properties:
+                  network: { type: string, enum: [testnet, mainnet] }
+                  assets:
+                    type: array
+                    items:
+                      type: object
+                      required: [code, issuer, domain, name]
+                      properties:
+                        code: { type: string, example: USDC }
+                        issuer: { type: string, example: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN }
+                        domain: { type: string, example: centre.io }
+                        name: { type: string, example: USD Coin }
+components:
+  parameters:
+    Asset:
+      name: asset
+      in: path
+      required: true
+      description: "`XLM` (or `native`) or `CODE:ISSUER`; the issuer must be a checksum-valid G... key. Bare codes are rejected."
+      schema: { type: string, example: XLM }
+  responses:
+    ValidationError:
+      description: Invalid asset, range, or batch list.
+      content:
+        application/json:
+          schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+          example:
+            code: VALIDATION_ERROR
+            error: Request validation failed
+            details:
+              - location: query
+                path: "assets[1]"
+                message: must be XLM or CODE:ISSUER with a valid Stellar issuer (G...)
+                value: USDC
+  schemas:
+    PriceQuote:
+      type: object
+      required: [asset, price, currency, source, updatedAt]
+      properties:
+        asset: { type: string, description: "Canonical id: XLM or CODE:ISSUER", example: XLM }
+        price: { type: [string, "null"], description: USD per unit as a decimal string, example: "0.1132" }
+        currency: { type: string, const: USD }
+        source: { type: string, enum: [stellar_dex, coingecko, unavailable] }
+        updatedAt: { type: [string, "null"], format: date-time }
+    PriceHistory:
+      type: object
+      required: [asset, currency, range, resolution, intervalSeconds, source, from, to, points]
+      properties:
+        asset: { type: string }
+        currency: { type: string, const: USD }
+        range: { type: string, enum: ["24h", "7d", "30d", "1y"] }
+        resolution: { type: string, enum: ["1h", "1d"], description: Horizon trade-aggregation resolution used }
+        intervalSeconds: { type: integer, description: Spacing between points }
+        source: { type: string, enum: [stellar_dex, unavailable] }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        points:
+          type: array
+          maxItems: 200
+          items:
+            type: object
+            required: [t, price, filled]
+            properties:
+              t: { type: string, format: date-time, description: Start of the interval }
+              price: { type: [string, "null"], description: Close price in USD; null before the first trade in the window }
+              filled: { type: boolean, description: True when no trade occurred and the previous price was carried forward }
