@@ -3,12 +3,100 @@ import { config } from "../../config";
 import { SorobanService, ContractCallResult } from "../soroban";
 import { SorobanNotConfiguredError, SorobanSimulationError, SorobanTransactionError } from "../sorobanErrors";
 import { describeGlobeWalletError } from "./globeWalletErrors";
-import type { AssetInfo, AllowedTokenInfo } from "@stellar-global-wallet/types";
+import type {
+  AssetInfo,
+  AllowedTokenInfo,
+  RecoveryConfigView,
+  RecoveryProposalView,
+  RecoveryState,
+  SpendAllowance,
+} from "@stellar-global-wallet/types";
 
 // Re-exported for backward compatibility — this used to be declared locally
 // here. The canonical definition now lives in packages/types (issue #107)
 // so it can be shared with future SDK/client packages.
-export type { AssetInfo, AllowedTokenInfo };
+export type { AssetInfo, AllowedTokenInfo, RecoveryConfigView, RecoveryProposalView, RecoveryState, SpendAllowance };
+
+/** Average ledger close time used for ETA estimates (same figure as getPendingUpgrade). */
+const SECONDS_PER_LEDGER = 5;
+
+/** Raw `scValToNative` shape of the contract's `RecoveryConfig`. */
+interface RawRecoveryConfig {
+  threshold: number;
+  delay_in_ledgers: number;
+}
+
+/** Raw `scValToNative` shape of the contract's `RecoveryProposal`. */
+interface RawRecoveryProposal {
+  new_admin: string;
+  approvals: string[];
+  ready_at?: number | null;
+}
+
+/** Raw `scValToNative` shape of the contract's `SpendAllowance` (#50). */
+interface RawSpendAllowance {
+  limit: bigint | number | string;
+  spent: bigint | number | string;
+  remaining: bigint | number | string;
+  window_start: bigint | number | string;
+  window_resets_at: bigint | number | string;
+}
+
+/** Simulation-only source for reads with no natural caller; never needs to exist on-chain. */
+function readOnlySource(): string {
+  return StellarSdk.Keypair.random().publicKey();
+}
+
+function unixSecondsToIso(value: bigint | number | string): string {
+  return new Date(Number(value) * 1000).toISOString();
+}
+
+/**
+ * Adds quorum and timelock fields to a raw proposal. `latestLedger` is null
+ * when RPC couldn't report it; the ETA fields are then null too, but the
+ * on-chain facts (approvals, readyAtLedger) are still returned.
+ */
+export function deriveRecoveryProposal(
+  raw: RawRecoveryProposal,
+  config: RecoveryConfigView | null,
+  latestLedger: number | null,
+  now: number = Date.now()
+): RecoveryProposalView {
+  const approvals = raw.approvals ?? [];
+  const threshold = config?.threshold ?? null;
+  const readyAtLedger = raw.ready_at ?? null;
+  const ledgersRemaining =
+    readyAtLedger !== null && latestLedger !== null ? Math.max(0, readyAtLedger - latestLedger) : null;
+  return {
+    newAdmin: raw.new_admin,
+    approvals,
+    approvalsCount: approvals.length,
+    threshold,
+    approvalsRemaining: threshold !== null ? Math.max(0, threshold - approvals.length) : null,
+    quorumReached: threshold !== null && approvals.length >= threshold,
+    readyAtLedger,
+    latestLedger,
+    ledgersRemaining,
+    executableAt:
+      ledgersRemaining !== null ? new Date(now + ledgersRemaining * SECONDS_PER_LEDGER * 1000).toISOString() : null,
+    executable: readyAtLedger !== null && latestLedger !== null && latestLedger >= readyAtLedger,
+  };
+}
+
+/** Converts the contract's i128/u64 view into the API's string-amount shape. */
+export function toSpendAllowance(assetCode: string, raw: RawSpendAllowance): SpendAllowance {
+  const limit = BigInt(raw.limit);
+  const unlimited = limit === 0n;
+  return {
+    assetCode,
+    unlimited,
+    limit: limit.toString(),
+    spent: BigInt(raw.spent).toString(),
+    remaining: unlimited ? null : BigInt(raw.remaining).toString(),
+    windowStartsAt: unixSecondsToIso(raw.window_start),
+    windowResetsAt: unixSecondsToIso(raw.window_resets_at),
+  };
+}
 
 function requireContractId(): string {
   if (!config.GLOBE_WALLET_CONTRACT_ID) {
@@ -50,6 +138,106 @@ export class GlobeWalletContract {
         args: [StellarSdk.nativeToScVal(userPublicKey, { type: "address" })],
       })
     );
+  }
+
+  /** Read-only: the current guardian set (#51). Empty array when none are registered. */
+  async getGuardians(): Promise<string[]> {
+    const contractId = requireContractId();
+    const guardians = await withWalletErrorTranslation(
+      this.soroban.simulate<string[] | null>({
+        contractId,
+        method: "guardians",
+        sourcePublicKey: readOnlySource(),
+        args: [],
+      })
+    );
+    return guardians ?? [];
+  }
+
+  /** Read-only: recovery threshold and timelock (#51). Null when recovery isn't configured. */
+  async getRecoveryConfig(): Promise<RecoveryConfigView | null> {
+    const contractId = requireContractId();
+    const raw = await withWalletErrorTranslation(
+      this.soroban.simulate<RawRecoveryConfig | null | undefined>({
+        contractId,
+        method: "recovery_config",
+        sourcePublicKey: readOnlySource(),
+        args: [],
+      })
+    );
+    if (!raw) return null;
+    return { threshold: Number(raw.threshold), delayInLedgers: Number(raw.delay_in_ledgers) };
+  }
+
+  /**
+   * Read-only: the active recovery proposal with approvals-vs-threshold and
+   * timelock ETA (#51). Null when no recovery is in progress.
+   */
+  async getRecoveryProposal(config?: RecoveryConfigView | null): Promise<RecoveryProposalView | null> {
+    const contractId = requireContractId();
+    const [raw, resolvedConfig] = await Promise.all([
+      withWalletErrorTranslation(
+        this.soroban.simulate<RawRecoveryProposal | null | undefined>({
+          contractId,
+          method: "recovery_proposal",
+          sourcePublicKey: readOnlySource(),
+          args: [],
+        })
+      ),
+      config !== undefined ? Promise.resolve(config) : this.getRecoveryConfig(),
+    ]);
+    if (!raw) return null;
+
+    let latestLedger: number | null = null;
+    try {
+      latestLedger = await this.soroban.getLatestLedger();
+    } catch {
+      latestLedger = null;
+    }
+    return deriveRecoveryProposal(
+      { ...raw, ready_at: raw.ready_at === undefined || raw.ready_at === null ? null : Number(raw.ready_at) },
+      resolvedConfig,
+      latestLedger
+    );
+  }
+
+  /** Guardians, config and proposal in one call for the recovery screen (#51). */
+  async getRecoveryState(): Promise<RecoveryState> {
+    const [guardians, config] = await Promise.all([this.getGuardians(), this.getRecoveryConfig()]);
+    const proposal = await this.getRecoveryProposal(config);
+    return {
+      guardians,
+      guardianCount: guardians.length,
+      config,
+      configured: config !== null,
+      proposal,
+    };
+  }
+
+  /**
+   * Read-only: daily limit, spent-today and remaining for one asset (#50).
+   * Window bounds come from the contract's own ledger-time calculation.
+   */
+  async getSpendAllowance(userPublicKey: string, assetCode: string): Promise<SpendAllowance> {
+    const contractId = requireContractId();
+    const raw = await withWalletErrorTranslation(
+      this.soroban.simulate<RawSpendAllowance>({
+        contractId,
+        method: "get_spend_allowance",
+        sourcePublicKey: userPublicKey,
+        args: [
+          StellarSdk.nativeToScVal(userPublicKey, { type: "address" }),
+          StellarSdk.nativeToScVal(assetCode, { type: "string" }),
+        ],
+      })
+    );
+    return toSpendAllowance(assetCode, raw);
+  }
+
+  /** {@link getSpendAllowance} for every asset on the user's whitelist (#50). */
+  async getSpendAllowances(userPublicKey: string): Promise<SpendAllowance[]> {
+    const assets = await this.getAssets(userPublicKey);
+    return Promise.all(assets.map((asset) => this.getSpendAllowance(userPublicKey, asset.code)));
   }
 
   /**
