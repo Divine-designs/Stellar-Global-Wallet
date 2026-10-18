@@ -71,3 +71,39 @@ describe("POST /csp-report", () => {
     expect(warnSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("API docs", () => {
+  const originalEnv = process.env;
+
+  afterEach(() => {
+    process.env = originalEnv;
+    jest.resetModules();
+  });
+
+  it("serves Swagger UI at /api/docs and the raw spec at /api/openapi.json when enabled", async () => {
+    process.env = { ...originalEnv, NODE_ENV: "test", ENABLE_API_DOCS: "true" };
+    jest.resetModules();
+    const { createApp: freshCreateApp } = await import("../app");
+    const docsApp = freshCreateApp();
+
+    const docsRes = await request(docsApp).get("/api/docs/").redirects(1);
+    expect(docsRes.status).toBe(200);
+
+    const specRes = await request(docsApp).get("/api/openapi.json");
+    expect(specRes.status).toBe(200);
+    expect(specRes.body).toHaveProperty("openapi");
+  });
+
+  it("returns 404 for /api/docs and /api/openapi.json when disabled", async () => {
+    process.env = { ...originalEnv, NODE_ENV: "test", ENABLE_API_DOCS: "false" };
+    jest.resetModules();
+    const { createApp: freshCreateApp } = await import("../app");
+    const docsApp = freshCreateApp();
+
+    const docsRes = await request(docsApp).get("/api/docs/");
+    expect(docsRes.status).toBe(404);
+
+    const specRes = await request(docsApp).get("/api/openapi.json");
+    expect(specRes.status).toBe(404);
+  });
+});

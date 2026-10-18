@@ -1,0 +1,114 @@
+{
+  "info": {
+    "name": "Stellar Global Wallet",
+    "description": "Postman collection for the Stellar Global Wallet backend API.\n\nDerived from docs/openapi.yaml. Import this file into Postman, set the `baseUrl` collection variable (defaults to http://localhost:4000) and run the `Auth / Login` request first — its test script stores the bearer token in the `token` collection variable, which every other request uses.\n\nNo secrets are stored in this file; supply credentials via the `email`/`password` collection variables or your Postman environment.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:4000" },
+    { "key": "email", "value": "demo@example.com" },
+    { "key": "password", "value": "" },
+    { "key": "token", "value": "" }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{token}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "// Ensure a token exists before authenticated requests run.",
+          "// The Auth / Login request populates `token`; this guard just warns if it is missing.",
+          "if (!pm.collectionVariables.get('token') && pm.info.requestName !== 'Login') {",
+          "  console.warn('No token set — run Auth / Login first.');",
+          "}"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const body = pm.response.json();",
+                  "if (body && body.token) {",
+                  "  pm.collectionVariables.set('token', body.token);",
+                  "}",
+                  "pm.test('login succeeded', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/auth/login", "host": ["{{baseUrl}}"], "path": ["api", "v1", "auth", "login"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "GET",
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Wallet",
+      "item": [
+        {
+          "name": "Send precheck",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sourcePublicKey\": \"{{sourcePublicKey}}\",\n  \"destinationPublicKey\": \"{{destinationPublicKey}}\",\n  \"amount\": \"1.0000000\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/api/v1/wallet/send/precheck", "host": ["{{baseUrl}}"], "path": ["api", "v1", "wallet", "send", "precheck"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Resolve",
+      "item": [
+        {
+          "name": "Resolve address",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/resolve?q={{query}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "v1", "resolve"],
+              "query": [{ "key": "q", "value": "{{query}}" }]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

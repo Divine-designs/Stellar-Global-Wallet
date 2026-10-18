@@ -1,3 +1,16 @@
+# OpenAPI 3.1 paths for the send-flow and statement endpoints (#62–#65).
+#
+# The full spec for every /api/v1 route is tracked in issue #15; this file
+# covers the routes added/changed by #62, #63, #64 and #65 and reuses the
+# shared error envelope + examples from ./openapi-errors.yaml so it can be
+# merged into that spec unchanged.
+#
+# Amount convention (#25): every monetary amount in a response is a JSON
+# string, never a number. Stellar amounts use decimal strings with up to 7
+# decimal places (see `Amount`). Soroban i128 values are returned in base
+# units (stroops) as `{ value: "<integer string>", decimals: 7 }` (see
+# `BaseUnitAmount`). Prices are the exception: they may legitimately need
+# more than 7 decimals and are documented separately (see `Price`).
 openapi: 3.1.0
 info:
   title: Stellar Global Wallet API
@@ -40,31 +53,343 @@ servers:
     description: Local development
 paths: {}
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: >-
+        Optional client-supplied correlation ID. Accepted only when it matches
+        `^[A-Za-z0-9-]{8,64}$`; otherwise the server generates a UUID. The
+        resolved value is always echoed back in the `X-Request-Id` response
+        header and included in error envelopes as `requestId`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
+  headers:
+    X-Request-Id:
+      description: >-
+        Correlation ID for this request. Present on every response (success
+        and error). Use it to find the matching server log line.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
   schemas:
-    Error:
+    ErrorResponse:
+      $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse"
+    Amount:
+      type: string
+      pattern: '^\d+(\.\d{1,7})?$'
+      description: >-
+        Positive decimal string, at most 7 decimal places. Never a JSON
+        number. Use this for every Stellar amount (balances, limits, fees,
+        spendable, send amounts).
+      example: "12.5"
+    BaseUnitAmount:
+      type: object
+      description: >-
+        A Soroban i128 value expressed in base units (stroops). `value` is an
+        integer string (never a JSON number) and `decimals` states how many
+        decimal places to shift by to get the human amount. For Stellar
+        assets `decimals` is 7.
+      required: [value, decimals]
+      properties:
+        value:
+          type: string
+          pattern: '^-?\d+$'
+          description: Integer amount in base units, as a string.
+          example: "10000000"
+        decimals:
+          type: integer
+          minimum: 0
+          description: Number of decimal places the base units represent.
+          example: 7
+    Price:
+      type: string
+      description: >-
+        Price as a decimal string. Unlike `Amount`, prices may legitimately
+        need more than 7 decimal places, so no fixed precision is enforced
+        here; consumers must parse as a decimal, never a float.
+      example: "0.123456789"
+    AccountId:
+      type: string
+      pattern: "^G[A-Z2-7]{55}$"
+      description: Checksum-validated Stellar account ID (G...).
+      example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    Asset:
+      type: string
+      description: '"XLM" or "CODE:ISSUER". Defaults to XLM when omitted.'
+      example: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    SendOperationType:
+      type: string
+      enum: [payment, createAccount]
+      description: >-
+        Operation the build path uses (#65). `createAccount` is chosen
+        automatically when the destination does not exist, the asset is XLM
+        and amount >= 1 XLM.
+    SendPrecheckWarning:
+      type: object
+      required: [code, message, blocking]
+      properties:
+        code:
+          type: string
+          enum:
+            - DESTINATION_IS_SOURCE
+            - SOURCE_NOT_FUNDED
+            - DESTINATION_NOT_FUNDED
+            - DESTINATION_WILL_BE_CREATED
+            - NO_TRUSTLINE
+            - TRUSTLINE_NOT_AUTHORIZED
+            - MEMO_REQUIRED
+            - AMOUNT_EXCEEDS_SPENDABLE
+        message:
+          type: string
+        blocking:
+          type: boolean
+          description: True when submitting as-is would fail on-chain or risk losing funds.
+    SendPrecheckResponse:
       type: object
       description: Shared error envelope returned by every endpoint on failure.
       required:
         - error
       properties:
-        error:
-          type: object
-          required:
-            - code
-            - message
-          properties:
-            code:
-              type: string
-              description: >-
-                Stable machine-readable error code. See
-                `docs/error-codes.md` for the full catalogue.
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/SendPrecheckWarning" }
+        blocking:
+          type: boolean
+          description: True if any warning is blocking — do not offer "Sign".
+        operationType:
+          $ref: "#/components/schemas/SendOperationType"
+        spendable:
+          $ref: "#/components/schemas/Amount"
+    ResolvedAddress:
+      type: object
+      required: [type, accountId]
+      properties:
+        type:
+          type: string
+          enum: [account, muxed, federation]
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+        memo:
+          type: string
+          description: Memo returned by the federation server (federation only). Attach it to the payment.
+        memoType:
+          type: string
+          enum: [text, id, hash]
+        muxedId:
+          type: string
+          description: Muxed sub-account ID as a decimal string (muxed only).
+        muxedAddress:
+          type: string
+          description: The original M... address (muxed only).
+    FeeEstimate:
+      type: object
+      required: [stroops, xlm]
+      description: >-
+        A single fee tier. `stroops` is the per-operation fee in stroops
+        (1 XLM = 10,000,000 stroops) as a decimal string; `xlm` is the same
+        value formatted as an XLM decimal string. Both are strings so no
+        precision is lost in JSON.
+      properties:
+        stroops:
+          type: string
+          pattern: '^\d+$'
+          example: "100"
+        xlm:
+          type: string
+          pattern: '^\d+(\.\d{1,7})?$'
+          example: "0.0000100"
+    NetworkFeesResponse:
+      type: object
+      required: [low, normal, high, ledgerCapacityUsage, source]
+      properties:
+        low:
+          $ref: "#/components/schemas/FeeEstimate"
+        normal:
+          $ref: "#/components/schemas/FeeEstimate"
+        high:
+          $ref: "#/components/schemas/FeeEstimate"
+        ledgerCapacityUsage:
+          type: string
+          description: >-
+            Fraction (0–1) of the latest ledger's capacity in use, as a
+            decimal string. "0" when served from the fallback.
+          example: "0.42"
+        source:
+          type: string
+          enum: [horizon, fallback]
+          description: >-
+            `horizon` when the values come from live `/fee_stats`;
+            `fallback` when Horizon was unreachable and the base fee (100
+            stroops) is returned for every tier.
+    ContractFeeEstimate:
+      type: object
+      required: [inclusionFee, resourceFee, totalFee]
+      description: >-
+        Soroban fee estimate for a contract call (#14). Each tier is a
+        `FeeEstimate` (stroops + XLM strings). `inclusionFee` is the classic
+        per-operation inclusion fee; `resourceFee` is the Soroban
+        `minResourceFee` from simulation; `totalFee` is their sum. The
+        estimate matches the fee in the XDR produced by the corresponding
+        build route for the same inputs.
+      properties:
+        inclusionFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        resourceFee:
+          $ref: "#/components/schemas/FeeEstimate"
+        totalFee:
+          $ref: "#/components/schemas/FeeEstimate"
+  responses:
+    ValidationError:
+      description: Input failed validation
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          examples:
+            invalid:
+              $ref: "./openapi-errors.yaml#/components/examples/BadRequest400"
+    Unauthorized:
+      description: Missing or invalid bearer token
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example:
+            code: AUTH_HEADER_INVALID
+            error: Missing or malformed Authorization header
+            requestId: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
+
+paths:
+  /api/v1/network/fees:
+    get:
+      summary: Estimate low/normal/high network fees from Horizon fee stats (#13)
+      description: >-
+        Returns the p10/p50/p90 per-operation fees from Horizon
+        `/fee_stats` so the send flow can offer priority options during
+        surge pricing. Responses are cached in memory for 5 seconds. If
+        Horizon is unreachable the base fee (100 stroops) is returned for
+        every tier with `source: "fallback"`.
+      responses:
+        "200":
+          description: Fee estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NetworkFeesResponse" }
               examples:
-                - REFRESH_TOKEN_INVALID
-                - LOGIN_RATE_LIMITED
-                - ROUTE_NOT_FOUND
-            message:
-              type: string
-              description: Human-readable message for logs and debugging.
-            requestId:
-              type: string
-              description: Correlation id for support and tracing.
+                horizon:
+                  value:
+                    low: { stroops: "100", xlm: "0.0000100" }
+                    normal: { stroops: "200", xlm: "0.0000200" }
+                    high: { stroops: "1500", xlm: "0.0001500" }
+                    ledgerCapacityUsage: "0.42"
+                    source: horizon
+                fallback:
+                  value:
+                    low: { stroops: "100", xlm: "0.0000100" }
+                    normal: { stroops: "100", xlm: "0.0000100" }
+                    high: { stroops: "100", xlm: "0.0000100" }
+                    ledgerCapacityUsage: "0"
+                    source: fallback
+
+  /api/v1/contract/wallet/estimate:
+    post:
+      summary: Estimate the Soroban resource fee for a contract call (#14)
+      description: >-
+        Runs simulation only (no XDR is built or returned) and reports the
+        inclusion fee, the Soroban `minResourceFee` and their total so the
+        UI can show the full cost before signing a spend, recovery or
+        guardian change. The estimate matches the fee in the XDR produced
+        by the corresponding build route for the same inputs. If simulation
+        fails the mapped contract error is returned instead of a fee.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action, sourcePublicKey]
+              properties:
+                action:
+                  type: string
+                  enum:
+                    - record_spend
+                    - set_spend_limit
+                    - add_guardian
+                    - remove_guardian
+                    - add_asset
+                    - remove_asset
+                    - recovery_initiate
+                    - recovery_approve
+                    - recovery_revoke
+                    - recovery_execute
+                    - recovery_cancel
+                  description: Contract action to simulate.
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                params:
+                  type: object
+                  additionalProperties: true
+                  description: >-
+                    Action-specific parameters, identical to the matching
+                    build route. Amounts are decimal strings.
+      responses:
+        "200":
+          description: Fee estimate
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ContractFeeEstimate" }
+              example:
+                inclusionFee: { stroops: "100", xlm: "0.0000100" }
+                resourceFee: { stroops: "123456", xlm: "0.0123456" }
+                totalFee: { stroops: "123556", xlm: "0.0123556" }
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "422":
+          description: Simulation failed — mapped contract error, not a fee
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /api/v1/wallet/send/precheck:
+    post:
+      summary: Check a send for problems before signing (#64)
+      description: >-
+        Read-only. Loads the source and destination accounts and reports
+        every known reason the payment would fail or lose funds: destination
+        missing (and whether it would be created), missing/unauthorized
+        trustline, SEP-29 memo required, sending to yourself, and amount
+        above the spendable balance. A well-formed request always returns
+        200; problems come back as warnings.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourcePublicKey, destinationPublicKey, amount]
+              properties:
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                destinationPublicKey: { $ref: "#/components/schemas/AccountId" }
+                amount: { $ref: "#/components/schemas/Amount" }
+                asset: { $ref: "#/components/schemas/Asset" }
+                memo:
+                  type: string
+                  description: MEMO_TEXT, at most 28 UTF-8 bytes.
+      r

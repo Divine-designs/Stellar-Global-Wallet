@@ -14,6 +14,7 @@ export interface ValidationIssue {
 export interface AppErrorOptions {
   code: ErrorCode;
   details?: unknown;
+  requestId?: string;
   retryable?: boolean;
   status: number;
 }
@@ -34,6 +35,7 @@ export interface ErrorCodeCopy {
 export class AppError extends Error {
   readonly code: ErrorCode;
   readonly details?: unknown;
+  readonly requestId?: string;
   readonly retryable?: boolean;
   readonly status: number;
 
@@ -42,6 +44,7 @@ export class AppError extends Error {
     this.name = new.target.name;
     this.code = options.code;
     this.details = options.details;
+    this.requestId = options.requestId;
     this.retryable = options.retryable;
     this.status = options.status;
   }
@@ -73,6 +76,18 @@ export class NotFoundError extends AppError {
 export class UnauthorizedError extends AppError {
   constructor(message = "Unauthorized", code: ErrorCode = "UNAUTHORIZED", details?: unknown) {
     super(message, { code, details, status: 401 });
+  }
+}
+
+export class ForbiddenError extends AppError {
+  constructor(message = "Forbidden", code = "FORBIDDEN", details?: unknown) {
+    super(message, { code, details, status: 403 });
+  }
+}
+
+export class AccountMismatchError extends ForbiddenError {
+  constructor(message = "Authenticated account does not match the requested account", details?: unknown) {
+    super(message, "ACCOUNT_MISMATCH", details);
   }
 }
 
