@@ -177,6 +177,15 @@ const envSchema = z.object({
   // the worker logs an alert because the retention gap means events were
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
+
+  // #16 — interactive API docs (Swagger UI at /api/docs, raw spec at
+  // /api/openapi.json). Defaults to enabled outside production and disabled
+  // in production so a prod build never exposes docs unless explicitly
+  // opted in via ENABLE_API_DOCS=true.
+  ENABLE_API_DOCS: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => (v === undefined ? process.env.NODE_ENV !== "production" : v === "true")),
 });
 
 export const config = envSchema.parse(process.env);
