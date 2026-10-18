@@ -23,7 +23,7 @@ import { config } from "./config";
 import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
-import { NotFoundError } from "./errors/appError";
+import { AppError, NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
 export function createApp(
@@ -90,12 +90,25 @@ export function createApp(
   app.use("/api/v1/pending-txs", express.json({ limit: "64kb" }));
   app.use(express.json({ limit: "10kb" }));
 
+  // #22 — every non-2xx response must use the shared error envelope
+  // `{ error: { code, message, details?, retryable?, requestId } }`.
+  // express-rate-limit's default handler writes a plain-text body, so
+  // route the limit through errorHandler via next(AppError) instead.
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000, // 15 min
       max: 100,
       standardHeaders: true,
       legacyHeaders: false,
+      handler: (_req, _res, next) => {
+        next(
+          new AppError("Too many requests, please try again later", {
+            code: "RATE_LIMITED",
+            status: 429,
+            retryable: true,
+          })
+        );
+      },
     })
   );
 
