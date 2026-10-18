@@ -285,6 +285,123 @@ export class StellarService {
   }
 
   /**
+   * Display-ready, operation-level history (#59) with optional filters (#61).
+   *
+   * Backed by Horizon's `/accounts/:id/operations` with
+   * `join=transactions` (so memo/fee/op-count arrive in the same request)
+   * and `include_failed=true` (so failed transactions show up with
+   * `successful: false` instead of silently disappearing). See
+   * `scanHistory` for how filters interact with pagination and the scan cap.
+   */
+  async getHistory(
+    publicKey: string,
+    options: { limit?: number; cursor?: string; filters?: HistoryFilters } = {}
+  ): Promise<HistoryPage> {
+    return scanHistory(
+      (cursor, pageSize) => this.fetchHistoryPage(publicKey, cursor, pageSize),
+      {
+        limit: options.limit ?? 20,
+        cursor: options.cursor,
+        filters: options.filters,
+        scanCap: config.HISTORY_SCAN_CAP,
+      }
+    );
+  }
+
+  private async fetchHistoryPage(
+    publicKey: string,
+    cursor: string | undefined,
+    pageSize: number
+  ): Promise<HistoryItem[]> {
+    let builder = this.server
+      .operations()
+      .forAccount(publicKey)
+      .join("transactions")
+      .includeFailed(true)
+      .limit(pageSize)
+      .order("desc");
+    if (cursor) {
+      builder = builder.cursor(cursor);
+    }
+
+    let records: StellarSdk.Horizon.ServerApi.OperationRecord[];
+    try {
+      records = (await builder.call()).records;
+    } catch (err) {
+      if (hasResponseStatus(err, 404)) {
+        throw new NotFoundError(`Account ${publicKey} was not found on Horizon`, "ACCOUNT_NOT_FOUND");
+      }
+      if (hasResponseStatus(err, 400) && cursor) {
+        throw new ValidationError([
+          { location: "query", message: "cursor is not a valid history cursor", path: "cursor", value: cursor },
+        ]);
+      }
+      throw err;
+    }
+
+    return Promise.all(
+      records.map(async (op) => {
+        // Joined above, so this resolves from the already-fetched response
+        // rather than making a second Horizon request per item.
+        let tx: HorizonTransactionLike | undefined;
+        try {
+          tx = (await op.transaction()) as unknown as HorizonTransactionLike;
+        } catch (err) {
+          console.warn(`[stellar] failed to read joined transaction for operation ${op.id}: ${err}`);
+        }
+        return mapOperationToHistoryItem(op as unknown as HorizonOperationLike, tx, publicKey);
+      })
+    );
+  }
+
+  /**
+   * One transaction by hash with its decoded operations (#60). Operation
+   * `direction`/`counterparty` are computed relative to `perspective`
+   * (defaults to the transaction's source account).
+   */
+  async getTransactionDetail(hash: string, perspective?: string): Promise<TransactionDetail> {
+    let tx: StellarSdk.Horizon.ServerApi.TransactionRecord;
+    try {
+      tx = await this.server.transactions().transaction(hash).call();
+    } catch (err) {
+      if (hasResponseStatus(err, 404)) {
+        throw new NotFoundError(`Transaction ${hash} was not found on Horizon`, "TRANSACTION_NOT_FOUND");
+      }
+      throw err;
+    }
+
+    // A transaction has at most 100 operations, so one 200-record page
+    // always covers it.
+    const ops = await this.server
+      .operations()
+      .forTransaction(hash)
+      .includeFailed(true)
+      .limit(200)
+      .call();
+
+    const viewer = perspective ?? tx.source_account;
+    const txLike = tx as unknown as HorizonTransactionLike;
+    return {
+      hash: tx.hash,
+      ledger: tx.ledger_attr,
+      createdAt: tx.created_at,
+      successful: tx.successful,
+      sourceAccount: tx.source_account,
+      feeAccount: tx.fee_account,
+      fee: stroopsToXlm(tx.fee_charged),
+      maxFee: stroopsToXlm(tx.max_fee),
+      memo: tx.memo ?? null,
+      memoType: tx.memo_type,
+      operationCount: tx.operation_count,
+      perspective: viewer,
+      operations: ops.records.map((op) =>
+        mapOperationToHistoryItem(op as unknown as HorizonOperationLike, txLike, viewer)
+      ),
+      explorerUrl: explorerTxUrl(this.networkPassphrase, tx.hash),
+    };
+  }
+
+  /**
    * Check whether a destination account requires a memo (SEP-29).
    * Accounts signal memo requirements by storing a data entry with the key
    * "config.memo_required" set to the value "MQ==". This is the standard

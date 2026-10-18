@@ -6,6 +6,7 @@ import { rateLimit } from "express-rate-limit";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
+import { createTransactionsRouter } from "./routes/transactions";
 import { priceRouter } from "./routes/price";
 import { createAssetsRouter } from "./routes/assets";
 import { authRouter } from "./routes/auth";
