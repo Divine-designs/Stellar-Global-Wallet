@@ -8,6 +8,7 @@ import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
 import { createTransactionsRouter } from "./routes/transactions";
 import { priceRouter } from "./routes/price";
+import { createAssetsRouter } from "./routes/assets";
 import { authRouter } from "./routes/auth";
 import { cspReportRouter } from "./routes/cspReport";
 import { flagsRouter } from "./routes/flags";
@@ -15,6 +16,7 @@ import { devicesRouter } from "./routes/devices";
 import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
 import { createPendingTxRouter } from "./routes/pendingTx";
+import { createResolveRouter } from "./routes/resolve";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -22,10 +24,12 @@ import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
+import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 
 export function createApp(
   stellar: StellarService = new StellarService(),
-  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService())
+  globeWallet: GlobeWalletContract = new GlobeWalletContract(new SorobanService()),
+  priceServices: { prices: PriceService; history: PriceHistoryService } = createDefaultPriceServices()
 ) {
   const app = express();
 
@@ -112,10 +116,12 @@ export function createApp(
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));
   app.use("/api/v1/account", createAccountRouter(stellar));
-  // #60 — transaction detail by hash
-  app.use("/api/v1/transactions", createTransactionsRouter(stellar));
+  // #63 — resolve G.../M.../federation (name*domain) addresses
+  app.use("/api/v1/resolve", createResolveRouter());
   app.use("/api/v1/contract", createContractRouter(globeWallet));
   app.use("/api/v1/price", priceRouter);
+  // #52, #53 — asset search and stellar.toml metadata for the add-asset flow
+  app.use("/api/v1/assets", createAssetsRouter());
   app.use("/api/v1/auth", authRouter);
   app.use("/api/v1/flags", flagsRouter);
   // #87 — push notification device registration

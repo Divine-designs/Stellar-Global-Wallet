@@ -6,8 +6,13 @@ import { StellarService } from "./services/stellar";
 import { createAccountLock } from "./services/locks/createAccountLock";
 import { startPaymentNotifier } from "./services/paymentNotifier";
 import { startRecoveryNotifier } from "./services/recoveryNotifier";
+import { getVerifiedAssets } from "./services/verifiedAssets";
 
 async function main() {
+  // #54 — fail fast on a malformed verified-asset list rather than on the
+  // first request that needs it.
+  getVerifiedAssets();
+
   const { lock, shutdown } = await createAccountLock();
   const stellar = new StellarService(lock);
   const app = createApp(stellar);

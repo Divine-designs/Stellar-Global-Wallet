@@ -1,0 +1,5 @@
+# Verified-asset allowlists (#54). These decide which issued assets the
+# apps present as genuine (e.g. "real" USDC vs. a lookalike), so every
+# change must be reviewed by a maintainer. Enable "Require review from
+# Code Owners" on the main branch protection rule for this to be enforced.
+/backend/data/verified-assets.*.json @Genghis-codes

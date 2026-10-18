@@ -12,7 +12,7 @@ to hide or de-emphasize noise — not proof of abuse.
 | --- | --- | --- |
 | `dust` | The payment amount is below a configurable floor, in the payment's own asset units. | `SPAM_DUST_THRESHOLD` (default `0.5`) |
 | `memo_url` | The transaction memo contains a URL (`http://`, `https://`, or a bare `www.` host) — a common phishing pattern ("claim your reward at ..."). | n/a |
-| `unknown_asset` | The payment's asset is not native XLM and not on the verified-asset allow-list. | `VERIFIED_ASSETS` (default empty — deny-by-default) |
+| `unknown_asset` | The payment's asset is not native XLM and not on the verified-asset allow-list. | Curated list in `data/verified-assets.<network>.json` ([verified-assets.md](./verified-assets.md)) plus `VERIFIED_ASSETS` additions |
 
 Implementation: [`src/services/paymentFlags.ts`](../src/services/paymentFlags.ts).
 Wired into [`StellarService.getPaymentHistory`](../src/services/stellar.ts).
@@ -30,10 +30,11 @@ Wired into [`StellarService.getPaymentHistory`](../src/services/stellar.ts).
   or `path_payment_*`-type operation. Operation types without a single
   amount+asset (e.g. `create_account`, `account_merge`) are included in the
   feed but never get `dust`/`unknown_asset` (there's nothing to evaluate).
-- `VERIFIED_ASSETS` is a flat env-var allow-list (`"CODE:ISSUER,..."`).
+- The allow-list is the maintainer-reviewed list from
   [#54](https://github.com/Genghis-codes/Stellar-Global-Wallet/issues/54)
-  tracks replacing this with a maintained, richer verified-asset list; this
-  env var is the minimal version needed to make `unknown_asset` usable now.
+  (see [verified-assets.md](./verified-assets.md)). `VERIFIED_ASSETS`
+  (`"CODE:ISSUER,..."`) can add per-deployment entries on top of it, but
+  cannot remove curated ones.
 
 ## Configuration
 

@@ -1,7 +1,7 @@
 {
   "name": "globe-wallet-backend",
   "version": "0.1.0",
-  "description": "GlobeWallet REST API — Node.js + Express + TypeScript",
+  "description": "GlobeWallet REST API \u2014 Node.js + Express + TypeScript",
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@globe-wallet/sdk": "^0.1.0",
+    "@iarna/toml": "^2.2.5",
     "@stellar-global-wallet/types": "^0.1.0",
     "@stellar/stellar-sdk": "^16.0.1",
     "cors": "^2.8.5",

@@ -112,3 +112,69 @@ describe("Wallet /send muxed-address rejection (issue #5)", () => {
     expect(res.body.details[0].message).toContain("Muxed");
   });
 });
+
+describe("Wallet muxed-account receive endpoint (issue #71)", () => {
+  const G_ADDRESS = "GBZH7QMRVYFLVYQRY6O5SOM3G7MSQF7MMUEM3WUOGRV26W3R3K5M7G8A";
+
+  async function getAccessToken(): Promise<string> {
+    const login = await request(app)
+      .post("/api/v1/auth/login")
+      .set("x-api-key", "test-api-key");
+    return login.body.accessToken;
+  }
+
+  it("returns an M address for a valid id", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .post(`/api/v1/wallet/${G_ADDRESS}/muxed`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ id: "123" })
+      .expect(200);
+    expect(typeof res.body.muxedAccount).toBe("string");
+    expect(res.body.muxedAccount.startsWith("M")).toBe(true);
+    expect(res.body.muxedAccount).toHaveLength(69);
+    expect(res.body.baseAccount).toBe(G_ADDRESS);
+    expect(res.body.id).toBe("123");
+  });
+
+  it("rejects a non-numeric id with 400", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .post(`/api/v1/wallet/${G_ADDRESS}/muxed`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ id: "not-a-number" })
+      .expect(400);
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+    expect(res.body.details[0].path).toBe("id");
+  });
+
+  it("rejects an id outside the uint64 range with 400", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .post(`/api/v1/wallet/${G_ADDRESS}/muxed`)
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ id: "18446744073709551616" })
+      .expect(400);
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+    expect(res.body.details[0].path).toBe("id");
+  });
+
+  it("rejects an invalid public key with 400", async () => {
+    const accessToken = await getAccessToken();
+    const res = await request(app)
+      .post("/api/v1/wallet/NOTAVALIDKEY/muxed")
+      .set("Authorization", `Bearer ${accessToken}`)
+      .send({ id: "1" })
+      .expect(400);
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+    expect(res.body.details[0].path).toBe("publicKey");
+  });
+
+  it("rejects a request without auth with 401", async () => {
+    const res = await request(app)
+      .post(`/api/v1/wallet/${G_ADDRESS}/muxed`)
+      .send({ id: "1" })
+      .expect(401);
+    expect(res.body.code).toBeDefined();
+  });
+});
