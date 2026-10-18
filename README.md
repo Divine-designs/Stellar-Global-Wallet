@@ -45,7 +45,7 @@ flowchart LR
 | 📜 Smart contracts | [`contract/`](contract/) | Rust · Soroban | 🟡 Testnet |
 | 📦 SDK | [`packages/sdk`](packages/sdk/) | TypeScript, published as `@globe-wallet/sdk` | 🟡 Testnet |
 
-The UI is designed in the [Figma file template](https://claude.ai/artifact/HAEA9kUpEhSMCyjDwCBL6t#page-dcb81aee8d83). For a deep dive into structure, testnet status and the roadmap, see **[HACKMD.md](HACKMD.md)**. For which API URL, contract ID, or feature flags apply to local vs. testnet vs. mainnet, see **[backend/docs/environments.md](backend/docs/environments.md)**. Product analytics events and their privacy rules are defined in **[docs/specs/analytics.md](docs/specs/analytics.md)**.
+The UI is designed in the [Figma file template](https://claude.ai/artifact/HAEA9kUpEhSMCyjDwCBL6t#page-dcb81aee8d83). For a deep dive into structure, testnet status and the roadmap, see **[HACKMD.md](HACKMD.md)**. For which API URL, contract ID, or feature flags apply to local vs. testnet vs. mainnet, see **[backend/docs/environments.md](backend/docs/environments.md)**. Product analytics events and their privacy rules are defined in **[docs/specs/analytics.md](docs/specs/analytics.md)**. Authentication flows for web and mobile clients (SEP-10, token lifetimes, refresh, logout, cookie vs Bearer) are documented in **[backend/docs/auth.md](backend/docs/auth.md)**.
 
 Frontend behaviour specs live in [`docs/specs/`](docs/specs/): [spend limits](docs/specs/spend-limits.md).
 
