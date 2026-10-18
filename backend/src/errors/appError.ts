@@ -87,6 +87,25 @@ export class HorizonError extends AppError {
   }
 }
 
+/**
+ * Raised when a requested `setOptions` change would make the account's
+ * thresholds unreachable (e.g. sum of signer weights below a threshold, or
+ * master weight 0 with no other signers). This is a deny-by-default guard so
+ * a client can never build an XDR that permanently locks the account.
+ */
+export class LockoutError extends AppError {
+  readonly warnings: string[];
+
+  constructor(message: string, warnings: string[] = [], details?: unknown) {
+    super(message, {
+      code: "SET_OPTIONS_LOCKOUT",
+      details,
+      status: 422,
+    });
+    this.warnings = warnings;
+  }
+}
+
 export function isAppError(error: unknown): error is AppError {
   return error instanceof AppError;
 }

@@ -41,3 +41,28 @@ export class NonRetryableHorizonError extends HorizonError {
     });
   }
 }
+
+/**
+ * #65 — the destination account does not exist on the network and the
+ * payment can't create it: only native XLM can fund a new account, and only
+ * via `createAccount` with at least the minimum starting balance (1 XLM).
+ * `details.reason` is `NON_NATIVE_ASSET` or `BELOW_MINIMUM_STARTING_BALANCE`
+ * so clients can show the right fix without parsing `error`.
+ */
+export class DestinationNotFundedError extends AppError {
+  constructor(
+    message: string,
+    details: {
+      reason: "NON_NATIVE_ASSET" | "BELOW_MINIMUM_STARTING_BALANCE";
+      destination: string;
+      minimumStartingBalance: string;
+    }
+  ) {
+    super(message, {
+      code: "DESTINATION_NOT_FUNDED",
+      details,
+      retryable: false,
+      status: 400,
+    });
+  }
+}

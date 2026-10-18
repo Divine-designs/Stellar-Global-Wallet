@@ -20,39 +20,36 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
-## Asset discovery and wallet reads
+## Send flow & statements
 
-OpenAPI entries for these live in [docs/openapi.yaml](docs/openapi.yaml).
-All are unauthenticated reads.
+OpenAPI: [docs/openapi.yaml](docs/openapi.yaml). All routes below need a bearer
+JWT; amounts are decimal strings (max 7 places), never JSON numbers.
 
-| Route | What it returns |
-|---|---|
-| `GET /api/v1/assets/search?code=USDC[&limit&cursor]` | Horizon `/assets` page for the code; verified issuers first, then by trustline count (#53) |
-| `GET /api/v1/assets/search?domain=circle.com` | Assets the domain's stellar.toml lists whose issuer `home_domain` points back at it (#53) |
-| `GET /api/v1/assets/{code}/{issuer}` | `name`, `desc`, `image`, `decimals`, `homeDomain`, `orgName` from stellar.toml, plus a `status` (#52) |
-| `GET /api/v1/contract/wallet/guardians` | Guardian addresses (#51) |
-| `GET /api/v1/contract/wallet/recovery/config` | `{ threshold, delayInLedgers }` or `null` (#51) |
-| `GET /api/v1/contract/wallet/recovery/proposal` | Active proposal with approvals vs threshold and timelock ETA, or `null` (#51) |
-| `GET /api/v1/contract/wallet/recovery` | All three in one response (#51) |
-| `GET /api/v1/contract/wallet/{publicKey}/spend-allowance[/{assetCode}]` | `limit`, `spent`, `remaining`, `windowResetsAt` per asset (#50) |
-
-Notes:
-
-- **Verified assets** come from a small built-in list per network
-  (`src/services/verifiedAssets.ts`) plus `VERIFIED_ASSETS`
-  (comma-separated `CODE:ISSUER`). The activity feed's `unknown_asset` flag
-  reads the same variable.
-- **stellar.toml fetches** use https only, a 5s timeout and a 100KB cap,
-  and refuse hosts that resolve to private, loopback, link-local or other
-  non-public addresses, including on redirects. Results are cached in Redis
-  for 24h, or 1h when no metadata was found. A missing or malformed toml
-  returns `200` with null fields and a `status`, not an error.
-- **Spend windows** follow the contract: `ledger_timestamp / 86400`, so they
-  reset at 00:00:00 UTC by ledger close time. See
-  [docs/specs/spend-limits.md](../docs/specs/spend-limits.md).
-- The spend-allowance routes call the contract's new `get_spend_allowance`
-  view. Until the deployed contract is upgraded to include it, they return
-  `422 SOROBAN_SIMULATION_FAILED`.
+- **`POST /api/v1/wallet/send/precheck`** (#64) — read-only check before
+  signing. Body `{ sourcePublicKey, destinationPublicKey, amount, asset?, memo? }`
+  returns `{ warnings: [{ code, message, blocking }], blocking, operationType, spendable? }`.
+  Warning codes: `DESTINATION_IS_SOURCE`, `SOURCE_NOT_FUNDED`,
+  `DESTINATION_NOT_FUNDED`, `DESTINATION_WILL_BE_CREATED`, `NO_TRUSTLINE`,
+  `TRUSTLINE_NOT_AUTHORIZED`, `MEMO_REQUIRED` (SEP-29),
+  `AMOUNT_EXCEEDS_SPENDABLE`. Don't offer "Sign" while `blocking` is true.
+- **Unfunded destinations** (#65) — `POST /wallet/send` and
+  `POST /wallet/partial-transaction` automatically use `createAccount`
+  instead of `payment` when the destination doesn't exist, the asset is XLM
+  and the amount is at least 1 XLM. Any other send to an unfunded account
+  fails with `400 DESTINATION_NOT_FUNDED` (`details.reason`:
+  `NON_NATIVE_ASSET` or `BELOW_MINIMUM_STARTING_BALANCE`) before signing.
+  `partial-transaction` also returns `operationType`.
+- **`GET /api/v1/resolve?q=`** (#63) — resolves `G...` (as-is), `M...` muxed
+  addresses (`accountId` + `muxedId`) and SEP-2 federation addresses
+  (`alice*example.com` → `accountId`, plus `memo`/`memoType` if the server
+  returns one). Federation lookups time out after 3s (`504 FEDERATION_TIMEOUT`);
+  unknown names are `404 FEDERATION_NOT_FOUND`; a domain without a working
+  federation server is `502 FEDERATION_UNAVAILABLE`.
+- **`GET /api/v1/account/:publicKey/transactions/export.csv?from=&to=`** (#62)
+  — streams a CSV statement (`date,type,direction,amount,asset,counterparty,memo,fee,hash`).
+  `from`/`to` are ISO-8601, default to the last 365 days, max range 366 days
+  (`400 EXPORT_RANGE_TOO_LARGE`). Cells starting with `= + - @` are prefixed
+  with `'` to block spreadsheet formula injection.
 
 ## Contract event indexer
 

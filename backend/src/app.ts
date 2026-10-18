@@ -15,6 +15,7 @@ import { devicesRouter } from "./routes/devices";
 import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
 import { createPendingTxRouter } from "./routes/pendingTx";
+import { createResolveRouter } from "./routes/resolve";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -112,6 +113,8 @@ export function createApp(
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));
   app.use("/api/v1/account", createAccountRouter(stellar));
+  // #63 — resolve G.../M.../federation (name*domain) addresses
+  app.use("/api/v1/resolve", createResolveRouter());
   app.use("/api/v1/contract", createContractRouter(globeWallet));
   app.use("/api/v1/price", priceRouter);
   // #52, #53 — asset search and stellar.toml metadata for the add-asset flow

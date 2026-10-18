@@ -1,407 +1,325 @@
-# OpenAPI 3.1 entries for the asset-discovery and contract read endpoints
-# added in issues #50, #51, #52 and #53.
+# OpenAPI 3.1 paths for the send-flow and statement endpoints (#62–#65).
 #
-# This is not yet the full API document (tracked in issue #15). Paths are
-# added here as they are built so #15 can merge them rather than reverse-
-# engineer them. Error responses use the shared envelope and examples in
-# ./openapi-errors.yaml.
+# The full spec for every /api/v1 route is tracked in issue #15; this file
+# covers the routes added/changed by #62, #63, #64 and #65 and reuses the
+# shared error envelope + examples from ./openapi-errors.yaml so it can be
+# merged into that spec unchanged.
 openapi: 3.1.0
 info:
-  title: GlobeWallet API
+  title: GlobeWallet API — send flow & statements
   version: "1.0"
 servers:
   - url: http://localhost:4000
-tags:
-  - name: Assets
-    description: Asset discovery for the add-trustline flow.
-  - name: Recovery
-    description: Guardian and social-recovery state on the wallet contract.
-  - name: Spend limits
-    description: Daily spend allowance on the wallet contract.
-paths:
-  /api/v1/assets/search:
-    get:
-      tags: [Assets]
-      operationId: searchAssets
-      summary: Search assets by code or by issuer domain
-      description: |
-        Exactly one of `code` or `domain` is required.
-
-        - `code`: proxies Horizon `/assets?asset_code=` (`order=desc`). Within each page,
-          verified assets come first, then by number of authorized trustlines, descending.
-          On the first page, verified issuers for the code are always included even if
-          Horizon didn't return them, so a page can hold up to `limit` + (number of verified
-          issuers for that code) results. Ranking applies within a page only.
-        - `domain`: the assets the domain's stellar.toml lists under `[[CURRENCIES]]`, kept only
-          where the issuer account's `home_domain` matches the domain (SEP-1 two-way check).
-          Single page; `numAccounts` is null.
-
-        Unauthenticated: reads public network data only.
-      parameters:
-        - name: code
-          in: query
-          schema: { type: string, pattern: "^[A-Za-z0-9]{1,12}$" }
-          example: USDC
-        - name: domain
-          in: query
-          description: Public DNS hostname (no scheme, port or path).
-          schema: { type: string, maxLength: 253 }
-          example: circle.com
-        - name: limit
-          in: query
-          description: Horizon page size (code search only).
-          schema: { type: integer, minimum: 1, maximum: 50, default: 20 }
-        - name: cursor
-          in: query
-          description: "`nextCursor` from the previous page (code search only)."
-          schema: { type: string, pattern: "^[A-Za-z0-9_:-]{1,128}$" }
-      responses:
-        "200":
-          description: One page of results.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AssetSearchPage" }
-              example:
-                results:
-                  - code: USDC
-                    issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
-                    homeDomain: centre.io
-                    numAccounts: 512034
-                    verified: true
-                  - code: USDC
-                    issuer: GDUKMGUGDZQK6YHYA5Z6AY2G4XDSZPSZ3SW5UN3ARVMO6QSRDWP5YLEX
-                    homeDomain: example.org
-                    numAccounts: 1204
-                    verified: false
-                nextCursor: USDC_GDUKMGUGDZQK6YHYA5Z6AY2G4XDSZPSZ3SW5UN3ARVMO6QSRDWP5YLEX_credit_alphanum4
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "502": { $ref: "#/components/responses/HorizonUnavailable" }
-
-  /api/v1/assets/{code}/{issuer}:
-    get:
-      tags: [Assets]
-      operationId: getAssetMetadata
-      summary: Asset display metadata from the issuer's stellar.toml
-      description: |
-        Loads the issuer's `home_domain`, fetches `https://{home_domain}/.well-known/stellar.toml`
-        (5s timeout, 100KB cap, hosts resolving to private/loopback/link-local addresses refused)
-        and returns the matching `[[CURRENCIES]]` entry.
-
-        A missing or broken stellar.toml is not an error: the response is still `200` with the
-        metadata fields null and `status` saying why. Clients should fall back to the code and a
-        truncated issuer. Strings come from a third party; render them as text, never as HTML.
-
-        Cached 24h when `status` is `ok`, 1h otherwise.
-      parameters:
-        - name: code
-          in: path
-          required: true
-          schema: { type: string, pattern: "^[A-Za-z0-9]{1,12}$" }
-        - name: issuer
-          in: path
-          required: true
-          description: Issuer account (G..., checksum-validated).
-          schema: { type: string, minLength: 56, maxLength: 56 }
-      responses:
-        "200":
-          description: Metadata, possibly empty (see `status`).
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AssetMetadata" }
-              examples:
-                ok:
-                  value:
-                    code: USDC
-                    issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
-                    name: USD Coin
-                    desc: USDC is a fully collateralized US Dollar stablecoin.
-                    image: https://centre.io/usdc-icon.png
-                    decimals: 2
-                    homeDomain: centre.io
-                    orgName: Centre Consortium
-                    status: ok
-                noHomeDomain:
-                  value:
-                    code: ABC
-                    issuer: GDUKMGUGDZQK6YHYA5Z6AY2G4XDSZPSZ3SW5UN3ARVMO6QSRDWP5YLEX
-                    name: null
-                    desc: null
-                    image: null
-                    decimals: 7
-                    homeDomain: null
-                    orgName: null
-                    status: no_home_domain
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "404":
-          description: Issuer account does not exist.
-          content:
-            application/json:
-              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
-              example: { code: ISSUER_NOT_FOUND, error: "Issuer account G... was not found" }
-        "502": { $ref: "#/components/responses/HorizonUnavailable" }
-
-  /api/v1/contract/wallet/guardians:
-    get:
-      tags: [Recovery]
-      operationId: getGuardians
-      summary: Current guardian set
-      description: Simulated `guardians()` read. Empty array when none are registered.
-      responses:
-        "200":
-          description: Guardian addresses.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [guardians]
-                properties:
-                  guardians: { type: array, items: { type: string } }
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
-  /api/v1/contract/wallet/recovery/config:
-    get:
-      tags: [Recovery]
-      operationId: getRecoveryConfig
-      summary: Recovery threshold and timelock
-      description: Simulated `recovery_config()` read. `config` is null when recovery isn't configured.
-      responses:
-        "200":
-          description: Recovery config or null.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [config]
-                properties:
-                  config:
-                    oneOf:
-                      - $ref: "#/components/schemas/RecoveryConfig"
-                      - type: "null"
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
-  /api/v1/contract/wallet/recovery/proposal:
-    get:
-      tags: [Recovery]
-      operationId: getRecoveryProposal
-      summary: Active recovery proposal with progress
-      description: |
-        Simulated `recovery_proposal()` read plus approvals-vs-threshold and timelock fields.
-        `proposal` is null when no recovery is in progress. `executableAt` is an estimate
-        (~5 seconds per ledger); `readyAtLedger` is the on-chain fact.
-      responses:
-        "200":
-          description: Proposal or null.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [proposal]
-                properties:
-                  proposal:
-                    oneOf:
-                      - $ref: "#/components/schemas/RecoveryProposal"
-                      - type: "null"
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
-  /api/v1/contract/wallet/recovery:
-    get:
-      tags: [Recovery]
-      operationId: getRecoveryState
-      summary: Guardians, config and proposal in one response
-      responses:
-        "200":
-          description: Combined recovery state.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/RecoveryState" }
-              example:
-                guardians: [GBGUARDIANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, GBGUARDIANBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB]
-                guardianCount: 2
-                configured: true
-                config: { threshold: 2, delayInLedgers: 17280 }
-                proposal:
-                  newAdmin: GBNEWADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
-                  approvals: [GBGUARDIANAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA, GBGUARDIANBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB]
-                  approvalsCount: 2
-                  threshold: 2
-                  approvalsRemaining: 0
-                  quorumReached: true
-                  readyAtLedger: 1250000
-                  latestLedger: 1240000
-                  ledgersRemaining: 10000
-                  executableAt: "2026-10-19T06:53:20.000Z"
-                  executable: false
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
-  /api/v1/contract/wallet/{publicKey}/spend-allowance:
-    get:
-      tags: [Spend limits]
-      operationId: getSpendAllowances
-      summary: Remaining daily allowance for every whitelisted asset
-      parameters:
-        - $ref: "#/components/parameters/PublicKey"
-      responses:
-        "200":
-          description: One entry per asset in `get_assets`.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [allowances]
-                properties:
-                  allowances: { type: array, items: { $ref: "#/components/schemas/SpendAllowance" } }
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
-  /api/v1/contract/wallet/{publicKey}/spend-allowance/{assetCode}:
-    get:
-      tags: [Spend limits]
-      operationId: getSpendAllowance
-      summary: Remaining daily allowance for one asset
-      description: |
-        Simulated `get_spend_allowance(user, asset_code)` read. Uses the same window as
-        `record_spend`: `day = ledger_timestamp / 86400`, i.e. 00:00:00 UTC by ledger close
-        time. See docs/specs/spend-limits.md.
-      parameters:
-        - $ref: "#/components/parameters/PublicKey"
-        - name: assetCode
-          in: path
-          required: true
-          schema: { type: string, pattern: "^[A-Za-z0-9]{1,12}$" }
-      responses:
-        "200":
-          description: Allowance for the asset.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/SpendAllowance" }
-              example:
-                assetCode: XLM
-                unlimited: false
-                limit: "1000000000"
-                spent: "600000000"
-                remaining: "400000000"
-                windowStartsAt: "2026-10-18T00:00:00.000Z"
-                windowResetsAt: "2026-10-19T00:00:00.000Z"
-        "400": { $ref: "#/components/responses/ValidationError" }
-        "422": { $ref: "#/components/responses/SimulationFailed" }
-        "503": { $ref: "#/components/responses/ContractNotConfigured" }
-
 components:
-  parameters:
-    PublicKey:
-      name: publicKey
-      in: path
-      required: true
-      description: Stellar account (G..., checksum-validated).
-      schema: { type: string, minLength: 56, maxLength: 56 }
-
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ErrorResponse:
+      $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse"
+    Amount:
+      type: string
+      pattern: '^\d+(\.\d{1,7})?$'
+      description: Positive decimal string, at most 7 decimal places. Never a JSON number.
+      example: "12.5"
+    AccountId:
+      type: string
+      pattern: "^G[A-Z2-7]{55}$"
+      description: Checksum-validated Stellar account ID (G...).
+    Asset:
+      type: string
+      description: '"XLM" or "CODE:ISSUER". Defaults to XLM when omitted.'
+      example: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    SendOperationType:
+      type: string
+      enum: [payment, createAccount]
+      description: >-
+        Operation the build path uses (#65). `createAccount` is chosen
+        automatically when the destination does not exist, the asset is XLM
+        and amount >= 1 XLM.
+    SendPrecheckWarning:
+      type: object
+      required: [code, message, blocking]
+      properties:
+        code:
+          type: string
+          enum:
+            - DESTINATION_IS_SOURCE
+            - SOURCE_NOT_FUNDED
+            - DESTINATION_NOT_FUNDED
+            - DESTINATION_WILL_BE_CREATED
+            - NO_TRUSTLINE
+            - TRUSTLINE_NOT_AUTHORIZED
+            - MEMO_REQUIRED
+            - AMOUNT_EXCEEDS_SPENDABLE
+        message:
+          type: string
+        blocking:
+          type: boolean
+          description: True when submitting as-is would fail on-chain or risk losing funds.
+    SendPrecheckResponse:
+      type: object
+      required: [warnings, blocking, operationType]
+      properties:
+        warnings:
+          type: array
+          items: { $ref: "#/components/schemas/SendPrecheckWarning" }
+        blocking:
+          type: boolean
+          description: True if any warning is blocking — do not offer "Sign".
+        operationType:
+          $ref: "#/components/schemas/SendOperationType"
+        spendable:
+          type: string
+          description: >-
+            Source's spendable balance of the asset (XLM: balance minus
+            minimum reserve, selling liabilities and one base fee). Omitted
+            when the source account does not exist.
+    ResolvedAddress:
+      type: object
+      required: [type, accountId]
+      properties:
+        type:
+          type: string
+          enum: [account, muxed, federation]
+        accountId:
+          $ref: "#/components/schemas/AccountId"
+        memo:
+          type: string
+          description: Memo returned by the federation server (federation only). Attach it to the payment.
+        memoType:
+          type: string
+          enum: [text, id, hash]
+        muxedId:
+          type: string
+          description: Muxed sub-account ID as a decimal string (muxed only).
+        muxedAddress:
+          type: string
+          description: The original M... address (muxed only).
   responses:
     ValidationError:
-      description: Input failed validation.
+      description: Input failed validation
       content:
         application/json:
-          schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
           examples:
-            invalidParam: { $ref: "./openapi-errors.yaml#/components/examples/BadRequest400" }
-    HorizonUnavailable:
-      description: Horizon could not be reached or errored.
+            invalid:
+              $ref: "./openapi-errors.yaml#/components/examples/BadRequest400"
+    Unauthorized:
+      description: Missing or invalid bearer token
       content:
         application/json:
-          schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
-          example: { code: HORIZON_UNAVAILABLE, error: Could not search assets on Horizon, retryable: true }
-    SimulationFailed:
-      description: Contract simulation failed (e.g. the deployed contract predates this function).
-      content:
-        application/json:
-          schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
-    ContractNotConfigured:
-      description: GLOBE_WALLET_CONTRACT_ID is not set on this deployment.
-      content:
-        application/json:
-          schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+          example:
+            code: AUTH_HEADER_INVALID
+            error: Missing or malformed Authorization header
 
-  schemas:
-    AssetSearchResult:
-      type: object
-      required: [code, issuer, homeDomain, numAccounts, verified]
-      properties:
-        code: { type: string }
-        issuer: { type: string }
-        homeDomain: { type: [string, "null"] }
-        numAccounts: { type: [integer, "null"], description: Authorized trustlines; null for domain search. }
-        verified: { type: boolean, description: On this deployment's curated list (built-in + VERIFIED_ASSETS). }
-    AssetSearchPage:
-      type: object
-      required: [results, nextCursor]
-      properties:
-        results: { type: array, items: { $ref: "#/components/schemas/AssetSearchResult" } }
-        nextCursor: { type: [string, "null"] }
-    AssetMetadata:
-      type: object
-      required: [code, issuer, name, desc, image, decimals, homeDomain, orgName, status]
-      properties:
-        code: { type: string }
-        issuer: { type: string }
-        name: { type: [string, "null"] }
-        desc: { type: [string, "null"] }
-        image: { type: [string, "null"], format: uri, description: https URLs only. }
-        decimals: { type: integer, minimum: 0, maximum: 7, description: "`display_decimals`; 7 if not published." }
-        homeDomain: { type: [string, "null"] }
-        orgName: { type: [string, "null"], description: "`[DOCUMENTATION].ORG_NAME`." }
-        status:
-          type: string
-          enum: [ok, no_home_domain, invalid_home_domain, toml_unavailable, toml_invalid, currency_not_listed]
-    RecoveryConfig:
-      type: object
-      required: [threshold, delayInLedgers]
-      properties:
-        threshold: { type: integer }
-        delayInLedgers: { type: integer }
-    RecoveryProposal:
-      type: object
-      required:
-        [newAdmin, approvals, approvalsCount, threshold, approvalsRemaining, quorumReached,
-         readyAtLedger, latestLedger, ledgersRemaining, executableAt, executable]
-      properties:
-        newAdmin: { type: string }
-        approvals: { type: array, items: { type: string } }
-        approvalsCount: { type: integer }
-        threshold: { type: [integer, "null"] }
-        approvalsRemaining: { type: [integer, "null"] }
-        quorumReached: { type: boolean }
-        readyAtLedger: { type: [integer, "null"], description: Null until quorum is reached. }
-        latestLedger: { type: [integer, "null"] }
-        ledgersRemaining: { type: [integer, "null"] }
-        executableAt: { type: [string, "null"], format: date-time, description: Estimate at ~5s per ledger. }
-        executable: { type: boolean }
-    RecoveryState:
-      type: object
-      required: [guardians, guardianCount, config, configured, proposal]
-      properties:
-        guardians: { type: array, items: { type: string } }
-        guardianCount: { type: integer }
-        configured: { type: boolean }
-        config:
-          oneOf:
-            - $ref: "#/components/schemas/RecoveryConfig"
-            - type: "null"
-        proposal:
-          oneOf:
-            - $ref: "#/components/schemas/RecoveryProposal"
-            - type: "null"
-    SpendAllowance:
-      type: object
-      required: [assetCode, unlimited, limit, spent, remaining, windowStartsAt, windowResetsAt]
-      properties:
-        assetCode: { type: string }
-        unlimited: { type: boolean }
-        limit: { type: string, description: Stroops; "0" when unlimited. }
-        spent: { type: string, description: Stroops spent this window; always "0" when unlimited. }
-        remaining: { type: [string, "null"], description: Stroops; null when unlimited. }
-        windowStartsAt: { type: string, format: date-time }
-        windowResetsAt: { type: string, format: date-time }
+paths:
+  /api/v1/wallet/send/precheck:
+    post:
+      summary: Check a send for problems before signing (#64)
+      description: >-
+        Read-only. Loads the source and destination accounts and reports
+        every known reason the payment would fail or lose funds: destination
+        missing (and whether it would be created), missing/unauthorized
+        trustline, SEP-29 memo required, sending to yourself, and amount
+        above the spendable balance. A well-formed request always returns
+        200; problems come back as warnings.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sourcePublicKey, destinationPublicKey, amount]
+              properties:
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                destinationPublicKey: { $ref: "#/components/schemas/AccountId" }
+                amount: { $ref: "#/components/schemas/Amount" }
+                asset: { $ref: "#/components/schemas/Asset" }
+                memo:
+                  type: string
+                  description: MEMO_TEXT, at most 28 UTF-8 bytes.
+      responses:
+        "200":
+          description: Precheck result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SendPrecheckResponse" }
+              examples:
+                memoRequired:
+                  value:
+                    warnings:
+                      - code: MEMO_REQUIRED
+                        message: The destination requires a memo (SEP-29), e.g. an exchange deposit ID. Sending without one may lose funds.
+                        blocking: true
+                    blocking: true
+                    operationType: payment
+                    spendable: "98.4999900"
+                willCreate:
+                  value:
+                    warnings:
+                      - code: DESTINATION_WILL_BE_CREATED
+                        message: Destination account does not exist yet. It will be created and funded with this amount.
+                        blocking: false
+                    blocking: false
+                    operationType: createAccount
+                    spendable: "98.4999900"
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/wallet/send:
+    post:
+      summary: Send a payment (createAccount for unfunded XLM destinations, #65)
+      description: >-
+        If the destination does not exist and the asset is XLM with
+        amount >= 1, a `createAccount` operation is submitted instead of
+        `payment`. Otherwise an unfunded destination is rejected with
+        `DESTINATION_NOT_FUNDED` before anything is signed.
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Submitted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hash: { type: string }
+                  successful: { type: boolean }
+        "400":
+          description: Validation failure, MEMO_REQUIRED or DESTINATION_NOT_FUNDED
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              examples:
+                destinationNotFunded:
+                  value:
+                    code: DESTINATION_NOT_FUNDED
+                    error: Destination account GB... does not exist. Only XLM can be sent to a new account (at least 1 XLM, via createAccount).
+                    details:
+                      reason: NON_NATIVE_ASSET
+                      destination: GB...
+                      minimumStartingBalance: "1"
+                    retryable: false
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/wallet/partial-transaction:
+    post:
+      summary: Build and partially sign a send (createAccount for unfunded XLM destinations, #65)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Partially signed transaction
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [xdr, hash, operationType]
+                properties:
+                  xdr: { type: string }
+                  hash: { type: string }
+                  operationType: { $ref: "#/components/schemas/SendOperationType" }
+        "400":
+          description: Validation failure or DESTINATION_NOT_FUNDED (reason NON_NATIVE_ASSET | BELOW_MINIMUM_STARTING_BALANCE)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/resolve:
+    get:
+      summary: Resolve a G..., M... or federation (SEP-2) address (#63)
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, maxLength: 256 }
+          examples:
+            federation: { value: "alice*example.com" }
+            muxed: { value: "MA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUAAAAAAAAAAAACJUQ" }
+      responses:
+        "200":
+          description: Resolved account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ResolvedAddress" }
+              examples:
+                federation:
+                  value: { type: federation, accountId: GB..., memo: "12345", memoType: id }
+                muxed:
+                  value: { type: muxed, accountId: GA7Q..., muxedId: "1234", muxedAddress: MA7Q... }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Federation server has no record for the name
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { code: FEDERATION_NOT_FOUND, error: Federation address alice*example.com was not found }
+        "502":
+          description: Domain has no stellar.toml / FEDERATION_SERVER, or it returned an invalid record
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { code: FEDERATION_UNAVAILABLE, error: "Could not resolve alice*example.com: the domain has no reachable federation server", retryable: true }
+        "504":
+          description: Federation server did not answer within 3 seconds
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { code: FEDERATION_TIMEOUT, error: Federation server for alice*example.com did not respond within 3000ms, retryable: true }
+
+  /api/v1/account/{publicKey}/transactions/export.csv:
+    get:
+      summary: Download payment history as CSV (#62)
+      description: >-
+        Streams a CSV statement of the account's payment-shaped operations
+        (payments, path payments, create_account, account_merge), newest
+        first. Columns: date, type, direction (in|out|self), amount, asset
+        ("XLM" or CODE:ISSUER), counterparty, memo, fee (XLM, only on rows
+        whose transaction this account paid for; repeated per operation in
+        multi-op transactions), hash. Cells starting with = + - @ are
+        prefixed with ' to prevent spreadsheet formula injection. If Horizon
+        fails mid-stream the connection is aborted rather than ending
+        cleanly, so a truncated file is detectable.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: publicKey
+          in: path
+          required: true
+          schema: { $ref: "#/components/schemas/AccountId" }
+        - name: from
+          in: query
+          schema: { type: string, format: date-time }
+          description: Inclusive start (ISO-8601). Defaults to 365 days before `to`.
+        - name: to
+          in: query
+          schema: { type: string, format: date-time }
+          description: Inclusive end (ISO-8601). Defaults to now. Range may not exceed 366 days.
+      responses:
+        "200":
+          description: CSV stream
+          content:
+            text/csv:
+              schema: { type: string }
+              example: |
+                date,type,direction,amount,asset,counterparty,memo,fee,hash
+                2026-03-01T10:00:00Z,payment,out,25.0000000,XLM,GB...,rent,0.0000100,ab12...
+        "400":
+          description: VALIDATION_ERROR, INVALID_EXPORT_RANGE or EXPORT_RANGE_TOO_LARGE
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { code: EXPORT_RANGE_TOO_LARGE, error: Export range must not exceed 1 year, details: { maxRangeDays: 366 } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: Account not found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+              example: { code: ACCOUNT_NOT_FOUND, error: Account GB... was not found on Horizon }
