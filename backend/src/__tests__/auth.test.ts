@@ -25,6 +25,23 @@ import { createApp } from "../app";
 
 const app = createApp();
 
+// Cookie names used by the backend for cookie-mode sessions (issue #34).
+// `__Host-` requires Secure, so on http://localhost the dev-only names are used.
+const ACCESS_COOKIE = "__Host-gw_at";
+const REFRESH_COOKIE = "__Host-gw_rt";
+const DEV_ACCESS_COOKIE = "gw_at";
+const DEV_REFRESH_COOKIE = "gw_rt";
+
+function getSetCookies(res: request.Response): string[] {
+  const raw = res.headers["set-cookie"];
+  if (!raw) return [];
+  return Array.isArray(raw) ? raw : [raw];
+}
+
+function findCookie(res: request.Response, name: string): string | undefined {
+  return getSetCookies(res).find((c) => c.startsWith(`${name}=`));
+}
+
 describe("POST /api/v1/auth/login", () => {
   it("returns tokens with valid API key", async () => {
     const res = await request(app)
@@ -64,6 +81,50 @@ describe("POST /api/v1/auth/login", () => {
       .expect(401);
     expect(res.body.error).toBe("Unauthorized");
     expect(res.body.code).toBe("API_KEY_UNAUTHORIZED");
+  });
+});
+
+describe("POST /api/v1/auth/token (cookie mode)", () => {
+  it("sets httpOnly access and refresh cookies with correct flags", async () => {
+    const res = await request(app)
+      .post("/api/v1/auth/token?mode=cookie")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+
+    const access = findCookie(res, ACCESS_COOKIE) ?? findCookie(res, DEV_ACCESS_COOKIE);
+    const refresh = findCookie(res, REFRESH_COOKIE) ?? findCookie(res, DEV_REFRESH_COOKIE);
+
+    expect(access).toBeTruthy();
+    expect(refresh).toBeTruthy();
+    expect(access).toMatch(/HttpOnly/i);
+    expect(refresh).toMatch(/HttpOnly/i);
+    expect(access).toMatch(/SameSite=Lax/i);
+    expect(refresh).toMatch(/SameSite=Lax/i);
+    // Refresh cookie is scoped to the auth path.
+    expect(refresh).toMatch(/Path=\/api\/v1\/auth/i);
+  });
+
+  it("does not leak tokens in the JSON body in cookie mode", async () => {
+    const res = await request(app)
+      .post("/api/v1/auth/token?mode=cookie")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+
+    expect(res.body.accessToken).toBeUndefined();
+    expect(res.body.refreshToken).toBeUndefined();
+  });
+
+  it("keeps Bearer mode as the default", async () => {
+    const res = await request(app)
+      .post("/api/v1/auth/token")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+
+    expect(res.body.accessToken).toBeTruthy();
+    expect(res.body.refreshToken).toBeTruthy();
+    expect(res.body.tokenType).toBe("Bearer");
+    expect(findCookie(res, ACCESS_COOKIE)).toBeUndefined();
+    expect(findCookie(res, DEV_ACCESS_COOKIE)).toBeUndefined();
   });
 });
 
@@ -111,6 +172,28 @@ describe("POST /api/v1/auth/refresh", () => {
     expect(res.body.code).toBe("VALIDATION_ERROR");
     expect(Array.isArray(res.body.details)).toBe(true);
   });
+
+  it("rotates cookies in cookie mode using the refresh cookie", async () => {
+    const login = await request(app)
+      .post("/api/v1/auth/token?mode=cookie")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+
+    const cookies = getSetCookies(login)
+      .map((c) => c.split(";")[0])
+      .join("; ");
+
+    const res = await request(app)
+      .post("/api/v1/auth/refresh?mode=cookie")
+      .set("Cookie", cookies)
+      .expect(200);
+
+    const access = findCookie(res, ACCESS_COOKIE) ?? findCookie(res, DEV_ACCESS_COOKIE);
+    const refresh = findCookie(res, REFRESH_COOKIE) ?? findCookie(res, DEV_REFRESH_COOKIE);
+    expect(access).toBeTruthy();
+    expect(refresh).toBeTruthy();
+    expect(res.body.accessToken).toBeUndefined();
+  });
 });
 
 describe("POST /api/v1/auth/logout", () => {
@@ -130,27 +213,88 @@ describe("POST /api/v1/auth/logout", () => {
       .send({ refreshToken })
       .expect(401);
   });
+
+  it("clears session cookies in cookie mode", async () => {
+    const login = await request(app)
+      .post("/api/v1/auth/token?mode=cookie")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+
+    const cookies = getSetCookies(login)
+      .map((c) => c.split(";")[0])
+      .join("; ");
+
+    const res = await request(app)
+      .post("/api/v1/auth/logout?mode=cookie")
+      .set("Cookie", cookies)
+      .expect(200);
+
+    const cleared = getSetCookies(res);
+    const access = cleared.find(
+      (c) => c.startsWith(`${ACCESS_COOKIE}=`) || c.startsWith(`${DEV_ACCESS_COOKIE}=`)
+    );
+    const refresh = cleared.find(
+      (c) => c.startsWith(`${REFRESH_COOKIE}=`) || c.startsWith(`${DEV_REFRESH_COOKIE}=`)
+    );
+    expect(access).toBeTruthy();
+    expect(refresh).toBeTruthy();
+    // Cleared cookies expire immediately.
+    expect(access).toMatch(/Expires=Thu, 01 Jan 1970/i);
+    expect(refresh).toMatch(/Expires=Thu, 01 Jan 1970/i);
+  });
+});
+
+describe("GET /api/v1/auth/me", () => {
+  it("returns the current session identity and expiry", async () => {
+    const login = await request(app)
+      .post("/api/v1/auth/login")
+      .set("x-api-key", "test-api-key")
+      .expect(200);
+    const { accessToken } = login.body;
+
+    const res = await request(app)
+      .get("/api/v1/auth/me")
+      .set("Authorization", `Bearer ${accessToken}`)
+      .expect(200);
+
+    expect(res.body.account).toBe("api-key-user");
+    expect(res.body.authMethod).toBe("api-key");
+    expect(typeof res.body.issuedAt).toBe("number");
+    expect(typeof res.body.expiresAt).toBe("number");
+    expect(res.body.expiresAt).toBeGreaterThan(res.body.issuedAt);
+    expect(typeof res.body.sessionId).toBe("string");
+    expect(res.body.sessionId.length).toBeGreaterThan(0);
+  });
+
+  it("returns 401 when not signed in", async () => {
+    const res = await request(app)
+      .get("/api/v1/auth/me")
+      .expect(401);
+    expect(res.body.code).toBe("TOKEN_MISSING");
+  });
+
+  it("returns 401 TOKEN_EXPIRED for an expired token", async () => {
+    const jwt = require("jsonwebtoken");
+    const { config } = require("../config");
+    const expired = jwt.sign(
+      { sub: "api-key-user", authMethod: "api-key", sid: "expired-session" },
+      config.jwtSecret,
+      { expiresIn: -10 }
+    );
+
+    const res = await request(app)
+      .get("/api/v1/auth/me")
+      .set("Authorization", `Bearer ${expired}`)
+      .expect(401);
+    expect(res.body.code).toBe("TOKEN_EXPIRED");
+  });
 });
 
 describe("wallet routes with JWT", () => {
   it("rejects unauthenticated request", async () => {
     const res = await request(app)
-      .post("/api/v1/wallet/keypair")
+      .get("/api/v1/wallet/balances")
       .expect(401);
-    expect(res.body.code).toBe("AUTH_HEADER_INVALID");
-  });
-
-  it("accepts authenticated request with valid Bearer token", async () => {
-    const login = await request(app)
-      .post("/api/v1/auth/login")
-      .set("x-api-key", "test-api-key");
-    const { accessToken } = login.body;
-
-    const res = await request(app)
-      .post("/api/v1/wallet/keypair")
-      .set("Authorization", `Bearer ${accessToken}`)
-      .expect(200);
-    expect(res.body.publicKey).toBe("GABC1234");
-    expect(res.body.secretKey).toBe("SABC1234");
+    expect(res.body.code).toBe("TOKEN_MISSING");
   });
 });

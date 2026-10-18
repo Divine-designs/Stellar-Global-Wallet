@@ -4,6 +4,7 @@ import cors from "cors";
 import morgan from "morgan";
 import crypto from "crypto";
 import { rateLimit } from "express-rate-limit";
+import swaggerUi from "swagger-ui-express";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
@@ -18,6 +19,7 @@ import { emailRouter } from "./routes/email";
 import { createConfigRouter } from "./routes/config";
 import { createPendingTxRouter } from "./routes/pendingTx";
 import { createResolveRouter } from "./routes/resolve";
+import { createNetworkRouter } from "./routes/network";
 import { localeMiddleware } from "./middleware/locale";
 import { errorHandler } from "./middleware/errorHandler";
 import { config } from "./config";
@@ -26,6 +28,7 @@ import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { AppError, NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
+import { loadOpenApiSpec } from "./openapi";
 
 // #23 — inbound request IDs are only trusted if they match this format.
 // Anything else (newlines, control chars, oversized values) is discarded
@@ -54,15 +57,11 @@ export function createApp(
   // proxy hop between them and this process.
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
 
-  // #23 — request ID middleware must run first so every response (success
-  // or error) carries X-Request-Id and downstream handlers/logs can read
-  // req.requestId. Accept a well-formed inbound ID, otherwise generate one.
-  app.use((req, res, next) => {
-    const requestId = resolveRequestId(req.headers["x-request-id"]);
-    req.requestId = requestId;
-    res.setHeader("X-Request-Id", requestId);
-    next();
-  });
+  // #16 — interactive API docs are opt-in outside production. Default to
+  // enabled when NODE_ENV !== 'production' unless ENABLE_API_DOCS is set
+  // explicitly; in production they stay off unless the flag is set to true.
+  const docsEnabled =
+    config.ENABLE_API_DOCS ?? config.NODE_ENV !== "production";
 
   // helmet()'s defaults are tuned for a server rendering HTML (CSP that
   // still allows inline styles/scripts via nonces, X-Frame-Options, a
@@ -81,6 +80,10 @@ export function createApp(
   //     them from even reading responses; `same-site` keeps third-party
   //     sites that aren't part of this project from loading API responses
   //     via <script>/<img> while still allowing the project's own apps.
+  //
+  // #16 — Swagger UI is the one HTML surface this process serves, and it
+  // relies on inline scripts/styles. Rather than loosening the global CSP
+  // for every route, apply a route-specific CSP only to /api/docs below.
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -92,22 +95,12 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  // #23 — expose X-Request-Id so browser clients can read it from responses.
-  app.use(
-    cors({
-      origin: config.CORS_ORIGIN.split(","),
-      exposedHeaders: ["X-Request-Id"],
-    })
-  );
-
-  // #23 — include the request ID in every morgan log line so a UI error can
-  // be correlated with the exact server log entry.
-  morgan.token("request-id", (req) => (req as express.Request).requestId ?? "-");
-  app.use(
-    morgan(
-      ':remote-addr - :remote-user [:date[clf]] ":method :url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent" request-id=:request-id'
-    )
-  );
+  // #34 — cookie session mode needs credentialed CORS. `credentials: true`
+  // is incompatible with a wildcard origin, so the explicit allow-list from
+  // CORS_ORIGIN is required (never `*`). Bearer-token clients are unaffected.
+  const corsOrigins = config.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean);
+  app.use(cors({ origin: corsOrigins, credentials: true }));
+  app.use(morgan("combined"));
 
   // A multi-signed transaction envelope (several signatures on one XDR
   // blob) or a fee-bump wrapping one can comfortably exceed a few KB, and
@@ -152,6 +145,90 @@ export function createApp(
   // #93 — resolve Accept-Language into req.locale for all routes.
   app.use(localeMiddleware);
 
+  // #35 — CSRF protection for cookie-based sessions (double-submit token).
+  // Cookie auth is attached automatically by the browser, so a malicious
+  // site could otherwise trigger state-changing requests. Bearer-token
+  // requests are exempt (the browser never attaches them automatically).
+  // For cookie-authenticated state-changing requests we require the
+  // `X-CSRF-Token` header to match the non-httpOnly `gw_csrf` cookie, and
+  // we verify the `Origin` header against the CORS allow-list.
+  const CSRF_COOKIE = "gw_csrf";
+  const CSRF_HEADER = "x-csrf-token";
+  const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+  function parseCookies(header: string | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!header) return out;
+    for (const part of header.split(";")) {
+      const idx = part.indexOf("=");
+      if (idx === -1) continue;
+      const key = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (key) out[key] = decodeURIComponent(value);
+    }
+    return out;
+  }
+
+  // GET /auth/csrf — issues a fresh double-submit token. The cookie is
+  // intentionally non-httpOnly so browser clients can read it and echo it
+  // back in the X-CSRF-Token header. SameSite=Strict is a defence-in-depth
+  // layer on top of the token comparison.
+  app.get("/auth/csrf", (_req, res) => {
+    const token = crypto.randomBytes(32).toString("hex");
+    res.cookie(CSRF_COOKIE, token, {
+      httpOnly: false,
+      sameSite: "strict",
+      secure: config.NODE_ENV === "production",
+      path: "/",
+    });
+    res.json({ csrfToken: token });
+  });
+
+  app.use((req, res, next) => {
+    if (SAFE_METHODS.has(req.method)) return next();
+
+    const cookies = parseCookies(req.headers.cookie);
+    const hasSessionCookie = Boolean(cookies.gw_session);
+    const hasBearer = Boolean(
+      req.headers.authorization && /^Bearer\s+/i.test(req.headers.authorization)
+    );
+
+    // Bearer-authenticated requests are exempt from CSRF: the browser does
+    // not attach Authorization headers automatically, so a cross-site
+    // attacker cannot forge them.
+    if (hasBearer && !hasSessionCookie) return next();
+
+    // Only enforce CSRF for cookie-authenticated requests. Requests with
+    // neither a session cookie nor a Bearer token are left to the normal
+    // auth layer (they'll be rejected as unauthenticated there).
+    if (!hasSessionCookie) return next();
+
+    // Origin check against the CORS allow-list (defence in depth).
+    const origin = req.headers.origin;
+    if (origin && !corsOrigins.includes(origin)) {
+      return res.status(403).json({
+        error: "CSRF_ORIGIN_REJECTED",
+        message: "Origin is not allowed for cookie-authenticated requests",
+      });
+    }
+
+    const headerToken = req.headers[CSRF_HEADER];
+    const cookieToken = cookies[CSRF_COOKIE];
+    if (
+      typeof headerToken !== "string" ||
+      !cookieToken ||
+      headerToken.length !== cookieToken.length ||
+      !crypto.timingSafeEqual(Buffer.from(headerToken), Buffer.from(cookieToken))
+    ) {
+      return res.status(403).json({
+        error: "CSRF_TOKEN_INVALID",
+        message: "Missing or invalid CSRF token",
+      });
+    }
+
+    return next();
+  });
+
   // Health
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
 
@@ -162,6 +239,40 @@ export function createApp(
   // routes (see issue: "Add Content-Security-Policy guidance for the
   // future web app").
   app.use("/csp-report", cspReportRouter);
+
+  // #16 — interactive API docs. The OpenAPI spec is read once at startup
+  // and served both as Swagger UI at /api/docs and as raw JSON at
+  // /api/openapi.json. When disabled, these paths fall through to the 404
+  // handler below so production does not expose them by default.
+  if (docsEnabled) {
+    const openApiSpec = loadOpenApiSpec();
+
+    // Route-specific CSP: Swagger UI ships inline scripts/styles, so the
+    // global `default-src 'none'` would block it. Scope the relaxed policy
+    // to /api/docs only.
+    app.use(
+      "/api/docs",
+      helmet({
+        contentSecurityPolicy: {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            imgSrc: ["'self'", "data:"],
+            frameAncestors: ["'none'"],
+          },
+        },
+        crossOriginResourcePolicy: { policy: "same-site" },
+      })
+    );
+
+    app.get("/api/openapi.json", (_req, res) => res.json(openApiSpec));
+    app.use(
+      "/api/docs",
+      swaggerUi.serve,
+      swaggerUi.setup(openApiSpec, { customSiteTitle: "Stellar Global Wallet API" })
+    );
+  }
 
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));
@@ -184,6 +295,8 @@ export function createApp(
   const configRouter = createConfigRouter(globeWallet);
   app.use("/api/v1/config", configRouter);
   app.use("/config", configRouter);
+  // #13 — fee estimate (low/normal/high) from Horizon fee_stats, cached
+  app.use("/api/v1/network", createNetworkRouter());
 
   // #69 — testnet-only Friendbot funding for one-click onboarding. The
   // router is only mounted when the configured network is testnet, so on

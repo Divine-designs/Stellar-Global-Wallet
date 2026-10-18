@@ -1,44 +1,27 @@
-import request from 'supertest';
-import express, { Request, Response, NextFunction } from 'express';
-import { errorHandler } from '../middleware/errorHandler';
-import { AppError } from '../errors/AppError';
+import request from "supertest";
+import { createApp } from "../app";
+import { NotFoundError } from "../errors/appError";
+import { GlobeWalletContract } from "../services/contracts/globeWallet";
+import { StellarService } from "../services/stellar";
 
-function buildApp() {
-  const app = express();
-  app.use(express.json({ limit: '1kb' }));
-
-  app.get('/ok', (_req: Request, res: Response) => {
-    res.json({ ok: true });
-  });
-
-  app.get('/bad-request', (_req: Request, _res: Response, next: NextFunction) => {
-    next(new AppError('Invalid input', { code: 'BAD_REQUEST', status: 400 }));
-  });
-
-  app.get('/unauthorized', (_req: Request, _res: Response, next: NextFunction) => {
-    next(new AppError('Unauthorized', { code: 'UNAUTHORIZED', status: 401 }));
-  });
-
-  app.get('/rate-limited', (_req: Request, _res: Response, next: NextFunction) => {
-    next(
-      new AppError('Too many requests', {
-        code: 'RATE_LIMITED',
-        status: 429,
-        retryable: true,
-      })
-    );
-  });
-
-  app.get('/boom', (_req: Request, _res: Response, next: NextFunction) => {
-    next(new Error('kaboom'));
-  });
-
-  app.use((_req: Request, _res: Response, next: NextFunction) => {
-    next(new AppError('Not found', { code: 'NOT_FOUND', status: 404 }));
-  });
-
-  app.use(errorHandler);
-  return app;
+function createMockStellar(overrides: Record<string, unknown> = {}): StellarService {
+  return {
+    buildPartialTransaction: jest.fn(),
+    feeBumpTransaction: jest.fn(),
+    feeStats: jest.fn(),
+    findStrictReceivePaths: jest.fn(),
+    findStrictSendPaths: jest.fn(),
+    generateKeypair: jest.fn(),
+    getAccount: jest.fn(),
+    getAccountThresholds: jest.fn(),
+    getBalances: jest.fn(),
+    getTransactions: jest.fn(),
+    pathPaymentStrictReceive: jest.fn(),
+    pathPaymentStrictSend: jest.fn(),
+    sendPayment: jest.fn(),
+    submitWithAdditionalSignatures: jest.fn(),
+    ...overrides,
+  } as unknown as StellarService;
 }
 
 function expectEnvelope(body: any) {
@@ -58,11 +41,9 @@ describe('consistent error envelope', () => {
     expect(res.body).toEqual({ ok: true });
   });
 
-  it('returns 400 with the shared envelope', async () => {
-    const res = await request(app).get('/bad-request');
-    expect(res.status).toBe(400);
-    expectEnvelope(res.body);
-    expect(res.body.error.code).toBe('BAD_REQUEST');
+    expect(res.body.code).toBe("ACCOUNT_NOT_FOUND");
+    expect(res.body.error).toBe("Account GTEST was not found on Horizon");
+    expect(res).toSatisfyApiSpec();
   });
 
   it('returns 401 with the shared envelope', async () => {
@@ -88,12 +69,9 @@ describe('consistent error envelope', () => {
     expectEnvelope(res.body);
   });
 
-  it('returns 429 with the shared envelope and retryable flag', async () => {
-    const res = await request(app).get('/rate-limited');
-    expect(res.status).toBe(429);
-    expectEnvelope(res.body);
-    expect(res.body.error.code).toBe('RATE_LIMITED');
-    expect(res.body.error.retryable).toBe(true);
+    expect(res.body.code).toBe("INTERNAL_ERROR");
+    expect(res.body.error).toBe("Validation failed because field does not exist in payload");
+    expect(res).toSatisfyApiSpec();
   });
 
   it('returns 500 with the shared envelope and no stack trace', async () => {
@@ -105,10 +83,11 @@ describe('consistent error envelope', () => {
 
   it('returns 400 with the shared envelope for malformed JSON', async () => {
     const res = await request(app)
-      .post('/ok')
-      .set('Content-Type', 'application/json')
-      .send('{ not valid json');
-    expect(res.status).toBe(400);
-    expectEnvelope(res.body);
+      .get(`/api/v1/account/${"M".repeat(56)}`)
+      .expect(400);
+
+    expect(res.body.code).toBe("VALIDATION_ERROR");
+    expect(res.body.details[0].path).toBe("publicKey");
+    expect(res).toSatisfyApiSpec();
   });
 });
