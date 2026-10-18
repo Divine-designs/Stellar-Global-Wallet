@@ -20,5 +20,8 @@
   "EMAIL_NOT_VERIFIED": "Email address is not yet verified. Check your inbox for the verification link.",
   "EMAIL_TOKEN_EXPIRED": "The email verification link has expired. Please request a new one.",
   "EMAIL_TOKEN_INVALID": "The email verification link is invalid.",
-  "EMAIL_SEND_FAILED": "Failed to send the email. Please try again later."
+  "EMAIL_SEND_FAILED": "Failed to send the email. Please try again later.",
+  "TRANSACTION_NOT_FOUND": "The transaction was not found on the Stellar network.",
+  "UNSUPPORTED_CURRENCY": "The currency {currency} is not supported. Supported currencies: {supported}.",
+  "FX_UNAVAILABLE": "Exchange rates are temporarily unavailable. Please try again shortly."
 }

@@ -41,3 +41,107 @@ export interface AllowedTokenInfo {
   issuer?: string | null;
 }
 
+
+// ---------------------------------------------------------------------------
+//  Display-ready transaction history (#59, #60, #61)
+// ---------------------------------------------------------------------------
+
+/**
+ * An asset as returned by the history/detail endpoints. `id` is the
+ * canonical string form used everywhere else in the API (`XLM` for the
+ * native asset, `CODE:ISSUER` for issued assets, `pool:<id>` for
+ * liquidity-pool shares) and is what the `asset` filter matches against.
+ */
+export interface AssetRef {
+  id: string;
+  type: "native" | "credit_alphanum4" | "credit_alphanum12" | "liquidity_pool_shares";
+  code: string;
+  issuer: string | null;
+}
+
+/** High-level category the activity list renders; see docs/transaction-history.md. */
+export type HistoryItemType =
+  | "payment"
+  | "swap"
+  | "trustline"
+  | "account_created"
+  | "contract"
+  | "other";
+
+/** Direction relative to the account whose history is being viewed. */
+export type HistoryDirection = "in" | "out" | "self";
+
+/**
+ * One operation from an account's history, mapped so a UI can render
+ * "Received 25 USDC from G…ABC" without further Horizon calls. All amounts
+ * are decimal strings (7 dp, as Horizon returns them) — never numbers.
+ */
+export interface HistoryItem {
+  /** Horizon operation id. */
+  id: string;
+  /** Opaque cursor; pass as `cursor` to continue after this item. */
+  pagingToken: string;
+  type: HistoryItemType;
+  /** Raw Horizon operation type (e.g. `path_payment_strict_send`). */
+  operationType: string;
+  direction: HistoryDirection;
+  /** Amount moved/received from the viewing account's perspective, or null when the op carries none. */
+  amount: string | null;
+  asset: AssetRef | null;
+  /** For swaps and path payments: what was spent. Null otherwise. */
+  sourceAmount: string | null;
+  sourceAsset: AssetRef | null;
+  /** The other party (G… or C… address), or null when there is none. */
+  counterparty: string | null;
+  /** Trustline ops only: the new limit ("0.0000000" means the trustline was removed). */
+  trustlineLimit: string | null;
+  /** Contract ops only: the host function invoked (e.g. `HostFunctionTypeHostFunctionTypeInvokeContract`). */
+  contractFunction: string | null;
+  memo: string | null;
+  memoType: string | null;
+  /** Fee charged for the whole parent transaction, in XLM. Repeated on every op of a multi-op tx. */
+  fee: string | null;
+  /** Account that paid `fee`; only show the fee to the user when this equals their address. */
+  feePayer: string | null;
+  transactionHash: string;
+  /** Number of operations in the parent transaction (> 1 for multi-op transactions). */
+  transactionOperationCount: number | null;
+  createdAt: string;
+  successful: boolean;
+}
+
+export interface HistoryPage {
+  items: HistoryItem[];
+  /** Cursor for the next page; undefined when there is nothing left to fetch. */
+  next: string | undefined;
+  hasMore: boolean;
+  /**
+   * True when a filtered request stopped because it hit the scan cap before
+   * finding `limit` matches. `next` then resumes scanning where it stopped.
+   */
+  scanCapped: boolean;
+  /** Number of Horizon operations examined to build this page. */
+  scanned: number;
+}
+
+/** GET /api/v1/transactions/:hash response (#60). */
+export interface TransactionDetail {
+  hash: string;
+  ledger: number;
+  createdAt: string;
+  successful: boolean;
+  sourceAccount: string;
+  feeAccount: string;
+  /** Fee actually charged, in XLM. */
+  fee: string;
+  /** Maximum fee the submitter was willing to pay, in XLM. */
+  maxFee: string;
+  memo: string | null;
+  memoType: string;
+  operationCount: number;
+  /** Address operations' `direction` is relative to (the `account` query param, or the source account). */
+  perspective: string;
+  operations: HistoryItem[];
+  /** stellar.expert link for the configured network, or null on networks it doesn't index. */
+  explorerUrl: string | null;
+}

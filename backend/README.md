@@ -20,6 +20,21 @@ npm run type-check
 The `.env.example` points at a real testnet contract with a demo user, so read
 endpoints work without deploying anything.
 
+## Transaction history & prices
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/account/:publicKey/history` | Display-ready, operation-level history (direction, counterparty, asset, memo, fee, status). Filters: `asset`, `type`, `direction`, `since`, `until`. |
+| `GET /api/v1/transactions/:hash` | One transaction with decoded operations and a stellar.expert link. |
+| `GET /api/v1/price/:asset?currency=NGN` | Price with FX conversion to a local currency (cached 1h). |
+| `GET /api/v1/price/currencies` | Currencies accepted by `?currency=`. |
+
+Horizon can't filter by asset/type/date, so filtered history requests scan up to
+`HISTORY_SCAN_CAP` operations and may return `scanCapped: true` with fewer items
+than `limit` — keep following `next`. Details and limitations:
+[docs/transaction-history.md](docs/transaction-history.md); schemas:
+[docs/openapi.yaml](docs/openapi.yaml).
+
 ## Contract event indexer
 
 The indexer polls Soroban RPC `getEvents` filtered by the wallet contract ID and

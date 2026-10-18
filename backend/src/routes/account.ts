@@ -7,6 +7,13 @@ import { getUnifiedActivityFeed } from "../services/activityFeed";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
 import { AppError } from "../errors/appError";
 import { getDb } from "../db";
+import {
+  parseHistoryFilters,
+  validateAssetFilter,
+  validateDateRange,
+  validateDirectionFilter,
+  validateTypeFilter,
+} from "../validation/historyQuery";
 
 // #68 — user preferences schema. Only these keys are allowed; unknown keys
 // are rejected so the stored JSONB stays predictable across web and mobile.
@@ -94,6 +101,49 @@ export function createAccountRouter(stellar: StellarService): Router {
           next: result.next,
           hasMore: result.hasMore,
         });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #59 / #61 — display-ready, operation-level history ("Received 25 USDC
+  // from G…ABC") with optional asset/type/direction/date filters. See
+  // docs/transaction-history.md for the item shape and why filtered
+  // requests can return fewer than `limit` items with `scanCapped: true`.
+  accountRouter.get(
+    "/:publicKey/history",
+    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
+    query("limit")
+      .optional()
+      .isInt({ min: 1, max: 100 })
+      .withMessage("limit must be an integer between 1 and 100")
+      .toInt(),
+    query("cursor")
+      .optional()
+      .matches(/^[0-9]{1,20}$/)
+      .withMessage("cursor must be a paging token returned as `next` by a previous page"),
+    query("asset").optional().custom(validateAssetFilter),
+    query("type").optional().custom(validateTypeFilter),
+    query("direction").optional().custom(validateDirectionFilter),
+    query("since")
+      .optional()
+      .isISO8601({ strict: true })
+      .withMessage("since must be an ISO 8601 date or date-time"),
+    query("until")
+      .optional()
+      .isISO8601({ strict: true })
+      .withMessage("until must be an ISO 8601 date or date-time")
+      .bail()
+      .custom((until, { req }) => validateDateRange(until, req.query?.since)),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const limit = (req.query.limit as number | undefined) ?? 20;
+        const cursor = req.query.cursor as string | undefined;
+        const filters = parseHistoryFilters(req.query as Record<string, unknown>);
+        const page = await stellar.getHistory(req.params.publicKey, { limit, cursor, filters });
+        res.json(page);
       } catch (err) {
         next(err);
       }

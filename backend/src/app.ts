@@ -6,6 +6,7 @@ import { rateLimit } from "express-rate-limit";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
+import { createTransactionsRouter } from "./routes/transactions";
 import { priceRouter } from "./routes/price";
 import { authRouter } from "./routes/auth";
 import { cspReportRouter } from "./routes/cspReport";
@@ -111,6 +112,8 @@ export function createApp(
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));
   app.use("/api/v1/account", createAccountRouter(stellar));
+  // #60 — transaction detail by hash
+  app.use("/api/v1/transactions", createTransactionsRouter(stellar));
   app.use("/api/v1/contract", createContractRouter(globeWallet));
   app.use("/api/v1/price", priceRouter);
   app.use("/api/v1/auth", authRouter);

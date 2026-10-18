@@ -82,6 +82,21 @@ const envSchema = z.object({
   // flagged "unknown_asset" until explicitly added here.
   VERIFIED_ASSETS: z.string().default(""),
 
+  // #61 — maximum number of Horizon operations a single filtered
+  // GET /account/:publicKey/history request will examine before giving up
+  // and returning `scanCapped: true`. Horizon can't filter by asset/type/
+  // date itself, so on a very active account a narrow filter could
+  // otherwise page through the entire history in one request. Each 200
+  // operations scanned costs one Horizon round trip.
+  HISTORY_SCAN_CAP: z.coerce.number().int().min(1).max(10000).default(1000),
+
+  // #58 — fiat FX rates for ?currency= on price routes. Must return the
+  // open.er-api.com shape: { result: "success", base_code: "USD",
+  // time_last_update_unix, rates: { EUR: 0.92, ... } }. Rates are cached
+  // in-process for FX_CACHE_TTL_MS (default 1h).
+  FX_API_URL: z.string().url().default("https://open.er-api.com/v6/latest/USD"),
+  FX_CACHE_TTL_MS: z.coerce.number().int().positive().default(60 * 60 * 1000),
+
   // #77 — contract event indexer. The worker polls Soroban RPC getEvents
   // filtered by GLOBE_WALLET_CONTRACT_ID and persists a cursor in the
   // indexer_state table so restarts resume where they left off. These knobs

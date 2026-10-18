@@ -50,6 +50,9 @@ const REQUIRED_ERROR_KEYS: string[] = [
   "EMAIL_TOKEN_EXPIRED",
   "EMAIL_TOKEN_INVALID",
   "EMAIL_SEND_FAILED",
+  "TRANSACTION_NOT_FOUND",
+  "UNSUPPORTED_CURRENCY",
+  "FX_UNAVAILABLE",
 ];
 
 // ── Canonical notification keys ────────────────────────────────────────────

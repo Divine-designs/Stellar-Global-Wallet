@@ -1,0 +1,339 @@
+# OpenAPI 3.1 entries for transaction history, transaction detail and
+# fiat price display (issues #58, #59, #60, #61).
+#
+# The full /api/v1 spec is tracked in issue #15; until it lands, this file
+# holds the entries for these routes so they can be merged into it as-is.
+# Error responses use the shared envelope and examples from
+# ./openapi-errors.yaml.
+openapi: 3.1.0
+info:
+  title: GlobeWallet API — history, transaction detail and prices
+  version: "1.0"
+servers:
+  - url: http://localhost:4000
+paths:
+  /api/v1/account/{publicKey}/history:
+    get:
+      summary: Display-ready, operation-level account history
+      description: |
+        One item per operation, mapped so a client can render it directly
+        ("Received 25 USDC from G…ABC"). Newest first. Failed transactions
+        are included with `successful: false`.
+
+        **Filters (#61).** Horizon cannot filter operations by asset, type
+        or date, so the API pages through the account's operations (200 per
+        Horizon request) until `limit` matches are found, history runs out,
+        the scan passes `since`, or `HISTORY_SCAN_CAP` (default 1000)
+        operations have been examined. In the last case the response has
+        `scanCapped: true`, possibly fewer than `limit` items (even zero),
+        and a `next` cursor that resumes the scan where it stopped — keep
+        following `next` while `hasMore` is true. Without filters this is a
+        single Horizon request.
+      tags: [History]
+      parameters:
+        - $ref: "#/components/parameters/PublicKey"
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+        - name: cursor
+          in: query
+          description: The `next` value from a previous page.
+          schema: { type: string, pattern: "^[0-9]{1,20}$" }
+        - name: asset
+          in: query
+          description: |
+            Comma-separated (max 10). `XLM`/`native`, `CODE` (any issuer —
+            beware look-alike assets), or `CODE:ISSUER` (exact; issuer is
+            checksum-validated). Matches either side of an item, so
+            `asset=USDC` includes swaps into or out of USDC.
+          schema: { type: string }
+          example: USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN
+        - name: type
+          in: query
+          description: Comma-separated (max 10) item types.
+          schema: { type: string }
+          example: payment,swap
+        - name: direction
+          in: query
+          description: Comma-separated subset of `in`, `out`, `self`.
+          schema: { type: string }
+          example: in
+        - name: since
+          in: query
+          description: Inclusive lower bound on `createdAt` (ISO 8601).
+          schema: { type: string, format: date-time }
+          example: "2026-09-01T00:00:00Z"
+        - name: until
+          in: query
+          description: Exclusive upper bound on `createdAt` (ISO 8601). Must be later than `since`.
+          schema: { type: string, format: date-time }
+          example: "2026-10-01T00:00:00Z"
+      responses:
+        "200":
+          description: A page of history items
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HistoryPage" }
+        "400":
+          description: Invalid public key, cursor or filter
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example:
+                code: VALIDATION_ERROR
+                error: Request validation failed
+                details:
+                  - path: type
+                    location: query
+                    message: '"transfer" is not a valid type; expected one of payment, swap, trustline, account_created, contract, other'
+        "404":
+          description: Account does not exist on the network
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example: { code: ACCOUNT_NOT_FOUND, error: "Account G… was not found on Horizon" }
+
+  /api/v1/transactions/{hash}:
+    get:
+      summary: One transaction with decoded operations and explorer link
+      tags: [History]
+      parameters:
+        - name: hash
+          in: path
+          required: true
+          schema: { type: string, pattern: "^[0-9a-fA-F]{64}$" }
+        - name: account
+          in: query
+          description: |
+            Address that operations' `direction`/`counterparty` are relative
+            to (e.g. the signed-in user). Defaults to the transaction's
+            source account. Checksum-validated.
+          schema: { type: string }
+      responses:
+        "200":
+          description: Transaction detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransactionDetail" }
+        "400":
+          description: Malformed hash or account
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example:
+                code: VALIDATION_ERROR
+                error: Request validation failed
+                details:
+                  - path: hash
+                    location: params
+                    message: hash must be a 64-character hex transaction hash
+        "404":
+          description: No transaction with this hash on the configured network
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example: { code: TRANSACTION_NOT_FOUND, error: "Transaction 3389e9f0… was not found on Horizon" }
+
+  /api/v1/price/currencies:
+    get:
+      summary: Fiat currencies accepted by `?currency=`
+      tags: [Prices]
+      responses:
+        "200":
+          description: Supported currencies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [base, currencies]
+                properties:
+                  base: { type: string, const: USD }
+                  currencies: { type: array, items: { type: string } }
+
+  /api/v1/price/{asset}:
+    get:
+      summary: Asset price, optionally in a local fiat currency
+      description: |
+        `price_usd` is always USD; `price` is in `currency`. FX rates are
+        USD-based, fetched from `FX_API_URL` and cached for 1h; if a refresh
+        fails, the last rates are served with `fx.stale: true`. The price
+        oracle itself is not wired up yet, so `price`/`price_usd` are
+        currently `null` — `fx` is populated regardless.
+      tags: [Prices]
+      parameters:
+        - name: asset
+          in: path
+          required: true
+          schema: { type: string }
+        - name: currency
+          in: query
+          description: ISO 4217 code, case-insensitive. See GET /api/v1/price/currencies.
+          schema: { type: string, default: USD }
+          example: NGN
+      responses:
+        "200":
+          description: Price
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PriceResponse" }
+        "400":
+          description: Unsupported currency
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example:
+                code: UNSUPPORTED_CURRENCY
+                error: "The currency XYZ is not supported. Supported currencies: USD, EUR, …"
+                details: { currency: XYZ, supported: [USD, EUR, GBP, NGN, KES] }
+        "503":
+          description: FX rates unavailable and nothing cached
+          content:
+            application/json:
+              schema: { $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse" }
+              example:
+                code: FX_UNAVAILABLE
+                error: Exchange rates are temporarily unavailable. Please try again shortly.
+                retryable: true
+
+components:
+  parameters:
+    PublicKey:
+      name: publicKey
+      in: path
+      required: true
+      schema: { type: string, pattern: "^G[A-Z2-7]{55}$" }
+
+  schemas:
+    AssetRef:
+      type: object
+      required: [id, type, code, issuer]
+      properties:
+        id:
+          type: string
+          description: "`XLM`, `CODE:ISSUER`, or `pool:<id>` for liquidity-pool shares"
+        type:
+          type: string
+          enum: [native, credit_alphanum4, credit_alphanum12, liquidity_pool_shares]
+        code: { type: string }
+        issuer: { type: [string, "null"] }
+
+    HistoryItem:
+      type: object
+      required:
+        [id, pagingToken, type, operationType, direction, amount, asset, sourceAmount, sourceAsset,
+         counterparty, trustlineLimit, contractFunction, memo, memoType, fee, feePayer,
+         transactionHash, transactionOperationCount, createdAt, successful]
+      properties:
+        id: { type: string }
+        pagingToken: { type: string }
+        type:
+          type: string
+          enum: [payment, swap, trustline, account_created, contract, other]
+        operationType:
+          type: string
+          description: Raw Horizon operation type
+          example: path_payment_strict_send
+        direction:
+          type: string
+          enum: [in, out, self]
+          description: Relative to the account being viewed
+        amount:
+          type: [string, "null"]
+          description: Decimal string. What this account sent (out) or received (in/swap).
+          example: "25.0000000"
+        asset:
+          oneOf: [{ $ref: "#/components/schemas/AssetRef" }, { type: "null" }]
+        sourceAmount:
+          type: [string, "null"]
+          description: Path payments and swaps only — amount spent
+        sourceAsset:
+          oneOf: [{ $ref: "#/components/schemas/AssetRef" }, { type: "null" }]
+        counterparty:
+          type: [string, "null"]
+          description: The other party (G… or C…)
+        trustlineLimit:
+          type: [string, "null"]
+          description: Trustline items only; "0.0000000" means removed
+        contractFunction: { type: [string, "null"] }
+        memo: { type: [string, "null"] }
+        memoType: { type: [string, "null"] }
+        fee:
+          type: [string, "null"]
+          description: XLM fee for the whole parent transaction (repeated on each op of a multi-op tx)
+          example: "0.0000100"
+        feePayer:
+          type: [string, "null"]
+          description: Only show `fee` to a user when this is their address
+        transactionHash: { type: string }
+        transactionOperationCount: { type: [integer, "null"] }
+        createdAt: { type: string, format: date-time }
+        successful: { type: boolean }
+
+    HistoryPage:
+      type: object
+      required: [items, hasMore, scanCapped, scanned]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/HistoryItem" }
+        next:
+          type: string
+          description: Cursor for the next page; absent when there is nothing left
+        hasMore: { type: boolean }
+        scanCapped:
+          type: boolean
+          description: The scan cap was hit before `limit` matches were found; follow `next` to keep scanning
+        scanned:
+          type: integer
+          description: Horizon operations examined for this page
+
+    TransactionDetail:
+      type: object
+      required:
+        [hash, ledger, createdAt, successful, sourceAccount, feeAccount, fee, maxFee, memo, memoType,
+         operationCount, perspective, operations, explorerUrl]
+      properties:
+        hash: { type: string }
+        ledger: { type: integer }
+        createdAt: { type: string, format: date-time }
+        successful: { type: boolean }
+        sourceAccount: { type: string }
+        feeAccount: { type: string }
+        fee: { type: string, description: XLM actually charged, example: "0.0000100" }
+        maxFee: { type: string, description: XLM max fee bid }
+        memo: { type: [string, "null"] }
+        memoType: { type: string, example: text }
+        operationCount: { type: integer }
+        perspective:
+          type: string
+          description: Address operations' `direction` is relative to
+        operations:
+          type: array
+          items: { $ref: "#/components/schemas/HistoryItem" }
+        explorerUrl:
+          type: [string, "null"]
+          description: stellar.expert link; null on networks it doesn't index (futurenet, standalone)
+          example: https://stellar.expert/explorer/testnet/tx/3389e9f0f1a65f19736cacf544c2e825313e8447f569233bb8db39aa607c8889
+
+    FxQuote:
+      type: object
+      required: [base, quote, rate, source, updatedAt, stale]
+      properties:
+        base: { type: string, const: USD }
+        quote: { type: string, example: NGN }
+        rate: { type: string, description: Units of quote per 1 USD, example: "1580.25" }
+        source: { type: string, example: open.er-api.com }
+        updatedAt: { type: string, format: date-time }
+        stale: { type: boolean }
+
+    PriceResponse:
+      type: object
+      required: [asset, currency, price, price_usd, fx, source]
+      properties:
+        asset: { type: string }
+        currency: { type: string }
+        price: { type: [string, "null"], description: Price in `currency` (display precision) }
+        price_usd: { type: [string, "null"] }
+        fx: { $ref: "#/components/schemas/FxQuote" }
+        source: { type: string }
+        message: { type: string }
