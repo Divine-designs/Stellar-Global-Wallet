@@ -69,7 +69,37 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  app.use(cors({ origin: config.CORS_ORIGIN.split(",") }));
+
+  // #41 — CORS_ORIGIN is validated and split into an array in config.ts.
+  // CORS_ORIGIN_REGEX is an opt-in pattern for preview deploys (e.g.
+  // Vercel/Netlify) that can't be enumerated ahead of time. When it's set,
+  // an origin callback allows either an exact match or a regex match;
+  // otherwise the static allowlist is used directly.
+  const corsOrigin = config.CORS_ORIGIN_REGEX
+    ? (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        if (!origin || config.CORS_ORIGIN.includes(origin) || config.CORS_ORIGIN_REGEX!.test(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(null, false);
+      }
+    : config.CORS_ORIGIN;
+
+  app.use(
+    cors({
+      origin: corsOrigin,
+      credentials: true,
+      exposedHeaders: [
+        "X-Request-Id",
+        "RateLimit-Limit",
+        "RateLimit-Remaining",
+        "RateLimit-Reset",
+        "ETag",
+        "Deprecation",
+        "Sunset",
+      ],
+    })
+  );
   app.use(morgan("combined"));
 
   // A multi-signed transaction envelope (several signatures on one XDR

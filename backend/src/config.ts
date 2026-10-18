@@ -1,10 +1,69 @@
 import { z } from "zod";
 
+// #41 — CORS origins are validated at startup so a typo (trailing space,
+// missing scheme) fails fast with a clear message instead of silently
+// blocking the web app at request time. Each comma-separated entry is
+// trimmed and must parse as a URL. `exp://` origins (Expo dev) are kept
+// supported — `new URL()` accepts them.
+const corsOriginSchema = z
+  .string()
+  .min(1)
+  .transform((raw, ctx) => {
+    const origins = raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+
+    if (origins.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "CORS_ORIGIN must contain at least one origin",
+      });
+      return z.NEVER;
+    }
+
+    for (const origin of origins) {
+      try {
+        // eslint-disable-next-line no-new
+        new URL(origin);
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `CORS_ORIGIN entry "${origin}" is not a valid URL (expected e.g. https://app.globewallet.app or exp://192.168.1.10:8081)`,
+        });
+        return z.NEVER;
+      }
+    }
+
+    return origins;
+  });
+
+// #41 — opt-in regex for preview deploys (Vercel/Netlify). Validated as a
+// compilable RegExp so a bad pattern fails startup rather than throwing on
+// the first request.
+const corsOriginRegexSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .transform((raw, ctx) => {
+    if (raw === undefined) return undefined;
+    try {
+      return new RegExp(raw);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `CORS_ORIGIN_REGEX is not a valid regular expression: ${raw}`,
+      });
+      return z.NEVER;
+    }
+  });
+
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   HORIZON_URL: z.string().url().default("https://horizon-testnet.stellar.org"),
   NETWORK_PASSPHRASE: z.string().min(1),
-  CORS_ORIGIN: z.string().min(1),
+  CORS_ORIGIN: corsOriginSchema,
+  CORS_ORIGIN_REGEX: corsOriginRegexSchema,
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
   JWT_SECRET: z.string().min(1),
