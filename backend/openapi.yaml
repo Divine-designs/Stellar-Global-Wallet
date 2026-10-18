@@ -1,0 +1,558 @@
+openapi: 3.1.0
+info:
+  title: Stellar Global Wallet API
+  version: 1.0.0
+  description: |
+    Machine-readable contract for every `/api/v1` route exposed by the
+    Stellar Global Wallet backend. Amounts are always strings to avoid
+    floating point precision loss (Stellar uses 7 decimal places, see
+    [SEP-0001](https://github.com/stellar/stellar-protocol/blob/master/ecosystem/sep-0001.md)).
+servers:
+  - url: http://localhost:3000/api/v1
+    description: Local development
+  - url: https://api.stellar-wallet.example/api/v1
+    description: Production
+tags:
+  - name: auth
+    description: Authentication and session management
+  - name: wallet
+    description: Wallet creation and management
+  - name: account
+    description: Stellar account operations
+  - name: contract
+    description: Soroban smart contract interactions
+  - name: price
+    description: Asset price lookups
+  - name: config
+    description: Runtime configuration
+  - name: health
+    description: Service health checks
+paths:
+  /auth/register:
+    post:
+      tags: [auth]
+      summary: Register a new user
+      operationId: registerUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 8
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /auth/login:
+    post:
+      tags: [auth]
+      summary: Authenticate and receive a JWT
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+      responses:
+        '200':
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /auth/me:
+    get:
+      tags: [auth]
+      summary: Get the current authenticated user
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /wallet:
+    get:
+      tags: [wallet]
+      summary: List wallets for the current user
+      operationId: listWallets
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/PageSize'
+      responses:
+        '200':
+          description: Paginated wallets
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [wallet]
+      summary: Create a wallet
+      operationId: createWallet
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+      responses:
+        '201':
+          description: Wallet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /wallet/{walletId}:
+    parameters:
+      - $ref: '#/components/parameters/WalletId'
+    get:
+      tags: [wallet]
+      summary: Get a wallet by id
+      operationId: getWallet
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Wallet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Wallet'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [wallet]
+      summary: Delete a wallet
+      operationId: deleteWallet
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: Deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /account/{address}:
+    parameters:
+      - $ref: '#/components/parameters/StellarAddress'
+    get:
+      tags: [account]
+      summary: Get Stellar account details
+      operationId: getAccount
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Account details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /account/{address}/balance:
+    parameters:
+      - $ref: '#/components/parameters/StellarAddress'
+    get:
+      tags: [account]
+      summary: Get account balances
+      operationId: getAccountBalance
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Balances
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Balance'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /contract/{contractId}:
+    parameters:
+      - $ref: '#/components/parameters/ContractId'
+    get:
+      tags: [contract]
+      summary: Get Soroban contract metadata
+      operationId: getContract
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Contract metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Contract'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /contract/{contractId}/invoke:
+    parameters:
+      - $ref: '#/components/parameters/ContractId'
+    post:
+      tags: [contract]
+      summary: Invoke a Soroban contract method
+      operationId: invokeContract
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [method]
+              properties:
+                method:
+                  type: string
+                args:
+                  type: array
+                  items: {}
+      responses:
+        '200':
+          description: Invocation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /price/{asset}:
+    parameters:
+      - $ref: '#/components/parameters/Asset'
+    get:
+      tags: [price]
+      summary: Get the current price for an asset
+      operationId: getPrice
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Price
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Price'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /config:
+    get:
+      tags: [config]
+      summary: Get public runtime configuration
+      operationId: getConfig
+      responses:
+        '200':
+          description: Configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  network:
+                    type: string
+                    enum: [testnet, mainnet, futurenet]
+                  horizonUrl:
+                    type: string
+                    format: uri
+  /health:
+    get:
+      tags: [health]
+      summary: Health check
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      deprecated: true
+      description: Deprecated. Use bearerAuth instead.
+  parameters:
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    WalletId:
+      name: walletId
+      in: path
+      required: true
+      schema:
+        type: string
+    StellarAddress:
+      name: address
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/StellarAddress'
+    ContractId:
+      name: contractId
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/ContractAddress'
+    Asset:
+      name: asset
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Asset'
+  responses:
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Unauthorized:
+      description: Missing or invalid credentials
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+    Conflict:
+      description: Resource already exists
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable error code
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true
+    Amount:
+      type: string
+      pattern: '^\d+(\.\d{1,7})?$'
+      description: Decimal amount as a string with up to 7 fractional digits
+      examples: ['100.0000000', '0.5']
+    StellarAddress:
+      type: string
+      pattern: '^G[A-Z2-7]{55}$'
+      description: Stellar account public key (ed25519, base32)
+      examples: ['GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF']
+    ContractAddress:
+      type: string
+      pattern: '^C[A-Z2-7]{55}$'
+      description: Soroban contract address (strkey, base32)
+      examples: ['CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4']
+    Asset:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 12
+        issuer:
+          $ref: '#/components/schemas/StellarAddress'
+      description: Native asset omits issuer; issued assets require it
+    PaginatedResponse:
+      type: object
+      required: [data, page, pageSize, total]
+      properties:
+        data:
+          type: array
+          items: {}
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+        total:
+          type: integer
+          minimum: 0
+    User:
+      type: object
+      required: [id, email]
+      properties:
+        id:
+          type: string
+        email:
+          type: string
+          format: email
+    AuthResponse:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+        user:
+          $ref: '#/components/schemas/User'
+    Wallet:
+      type: object
+      required: [id, name, address]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        address:
+          $ref: '#/components/schemas/StellarAddress'
+        createdAt:
+          type: string
+          format: date-time
+    Account:
+      type: object
+      required: [address, sequence]
+      properties:
+        address:
+          $ref: '#/components/schemas/StellarAddress'
+        sequence:
+          type: string
+        balances:
+          type: array
+          items:
+            $ref: '#/components/schemas/Balance'
+    Balance:
+      type: object
+      required: [asset, balance]
+      properties:
+        asset:
+          $ref: '#/components/schemas/Asset'
+        balance:
+          $ref: '#/components/schemas/Amount'
+    Contract:
+      type: object
+      required: [id]
+      properties:
+        id:
+          $ref: '#/components/schemas/ContractAddress'
+        wasmHash:
+          type: string
+        methods:
+          type: array
+          items:
+            type: string
+    Price:
+      type: object
+      required: [asset, price, timestamp]
+      properties:
+        asset:
+          $ref: '#/components/schemas/Asset'
+        price:
+          $ref: '#/components/schemas/Amount'
+        timestamp:
+          type: string
+          format: date-time

@@ -44,6 +44,7 @@ describe("error responses", () => {
 
     expect(res.body.code).toBe("ACCOUNT_NOT_FOUND");
     expect(res.body.error).toBe("Account GTEST was not found on Horizon");
+    expect(res).toSatisfyApiSpec();
   });
 
   it("does not infer 404 from an unrelated error message substring", async () => {
@@ -62,6 +63,7 @@ describe("error responses", () => {
 
     expect(res.body.code).toBe("INTERNAL_ERROR");
     expect(res.body.error).toBe("Validation failed because field does not exist in payload");
+    expect(res).toSatisfyApiSpec();
   });
 
   it("returns a typed validation error body for invalid account parameters", async () => {
@@ -73,5 +75,6 @@ describe("error responses", () => {
 
     expect(res.body.code).toBe("VALIDATION_ERROR");
     expect(res.body.details[0].path).toBe("publicKey");
+    expect(res).toSatisfyApiSpec();
   });
 });

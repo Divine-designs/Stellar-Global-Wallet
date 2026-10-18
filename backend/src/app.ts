@@ -3,6 +3,7 @@ import helmet from "helmet";
 import cors from "cors";
 import morgan from "morgan";
 import { rateLimit } from "express-rate-limit";
+import swaggerUi from "swagger-ui-express";
 import { createWalletRouter } from "./routes/wallet";
 import { createAccountRouter } from "./routes/account";
 import { createContractRouter } from "./routes/contract";
@@ -25,6 +26,7 @@ import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
 import { NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
+import { loadOpenApiSpec } from "./openapi";
 
 export function createApp(
   stellar: StellarService = new StellarService(),
@@ -40,6 +42,12 @@ export function createApp(
   // lets a client spoof their apparent IP if there's more than one real
   // proxy hop between them and this process.
   app.set("trust proxy", config.TRUST_PROXY_HOPS);
+
+  // #16 — interactive API docs are opt-in outside production. Default to
+  // enabled when NODE_ENV !== 'production' unless ENABLE_API_DOCS is set
+  // explicitly; in production they stay off unless the flag is set to true.
+  const docsEnabled =
+    config.ENABLE_API_DOCS ?? config.NODE_ENV !== "production";
 
   // helmet()'s defaults are tuned for a server rendering HTML (CSP that
   // still allows inline styles/scripts via nonces, X-Frame-Options, a
@@ -58,6 +66,10 @@ export function createApp(
   //     them from even reading responses; `same-site` keeps third-party
   //     sites that aren't part of this project from loading API responses
   //     via <script>/<img> while still allowing the project's own apps.
+  //
+  // #16 — Swagger UI is the one HTML surface this process serves, and it
+  // relies on inline scripts/styles. Rather than loosening the global CSP
+  // for every route, apply a route-specific CSP only to /api/docs below.
   app.use(
     helmet({
       contentSecurityPolicy: {
@@ -200,6 +212,40 @@ export function createApp(
   // routes (see issue: "Add Content-Security-Policy guidance for the
   // future web app").
   app.use("/csp-report", cspReportRouter);
+
+  // #16 — interactive API docs. The OpenAPI spec is read once at startup
+  // and served both as Swagger UI at /api/docs and as raw JSON at
+  // /api/openapi.json. When disabled, these paths fall through to the 404
+  // handler below so production does not expose them by default.
+  if (docsEnabled) {
+    const openApiSpec = loadOpenApiSpec();
+
+    // Route-specific CSP: Swagger UI ships inline scripts/styles, so the
+    // global `default-src 'none'` would block it. Scope the relaxed policy
+    // to /api/docs only.
+    app.use(
+      "/api/docs",
+      helmet({
+        contentSecurityPolicy: {
+          directives: {
+            defaultSrc: ["'self'"],
+            scriptSrc: ["'self'", "'unsafe-inline'"],
+            styleSrc: ["'self'", "'unsafe-inline'"],
+            imgSrc: ["'self'", "data:"],
+            frameAncestors: ["'none'"],
+          },
+        },
+        crossOriginResourcePolicy: { policy: "same-site" },
+      })
+    );
+
+    app.get("/api/openapi.json", (_req, res) => res.json(openApiSpec));
+    app.use(
+      "/api/docs",
+      swaggerUi.serve,
+      swaggerUi.setup(openApiSpec, { customSiteTitle: "Stellar Global Wallet API" })
+    );
+  }
 
   // Routes
   app.use("/api/v1/wallet", createWalletRouter(stellar));

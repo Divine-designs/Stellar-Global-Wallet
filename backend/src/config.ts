@@ -119,41 +119,14 @@ const envSchema = z.object({
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
 
-  // #34 — httpOnly cookie session mode for the web app. When enabled, the
-  // web client can opt into cookie-based sessions via `?mode=cookie` on
-  // /auth/token and /auth/refresh instead of storing JWTs in localStorage.
-  // Mobile keeps Bearer mode (the default).
-  //
-  // Cookies are named `__Host-gw_at` / `__Host-gw_rt` in production, which
-  // RFC 6265bis requires to be Secure, host-only (no Domain) and Path=/. On
-  // plain http://localhost the browser rejects `__Host-` cookies, so a
-  // dev-only name (`gw_at` / `gw_rt`) is used instead. Set COOKIE_SECURE=false
-  // to force the dev cookie names (e.g. local dev over http).
-  COOKIE_SECURE: z
+  // #16 — interactive API docs (Swagger UI at /api/docs, raw spec at
+  // /api/openapi.json). Defaults to enabled outside production and disabled
+  // in production so a prod build never exposes docs unless explicitly
+  // opted in via ENABLE_API_DOCS=true.
+  ENABLE_API_DOCS: z
     .enum(["true", "false"])
-    .default("true")
-    .transform((v) => v === "true"),
-  // Explicit allow-list of browser origins permitted to send credentialed
-  // requests. Required when cookie mode is used — CORS with credentials must
-  // never use `*`. Comma-separated; falls back to CORS_ORIGIN when unset.
-  CORS_CREDENTIALS_ORIGINS: z.string().optional(),
-
-  // #35 — CSRF protection for cookie-based sessions. Double-submit token:
-  // GET /auth/csrf sets a non-httpOnly `gw_csrf` cookie; clients echo it in
-  // the `X-CSRF-Token` header on state-changing requests. The middleware
-  // compares header vs cookie for cookie-authenticated requests only
-  // (Bearer-authenticated requests are exempt) and also verifies the Origin
-  // header against the CORS allowlist. See src/middleware/csrf.ts.
-  //
-  // Name of the non-httpOnly double-submit cookie. Kept without the
-  // `__Host-` prefix so the browser can read it via document.cookie and echo
-  // it back in the header; it carries no secret on its own.
-  CSRF_COOKIE_NAME: z.string().min(1).default("gw_csrf"),
-  // Header the client must echo the cookie value in.
-  CSRF_HEADER_NAME: z.string().min(1).default("x-csrf-token"),
-  // Lifetime of the CSRF cookie in seconds. Short-lived; clients re-fetch
-  // from GET /auth/csrf when it expires.
-  CSRF_TOKEN_TTL_SECONDS: z.coerce.number().int().positive().default(3600),
+    .optional()
+    .transform((v) => (v === undefined ? process.env.NODE_ENV !== "production" : v === "true")),
 });
 
 export const config = envSchema.parse(process.env);
