@@ -1,8 +1,7 @@
 import { Router } from "express";
 import { body, query } from "express-validator";
 import { rateLimit } from "express-rate-limit";
-import { Keypair, Networks, Transaction, Utils } from "@stellar/stellar-sdk";
-import { UnauthorizedError, BadRequestError } from "../errors/appError";
+import { AppError, UnauthorizedError } from "../errors/appError";
 import { apiKeyAuth } from "../middleware/apiKeyAuth";
 import { assertValidRequest } from "../middleware/requestValidation";
 import {
@@ -21,12 +20,23 @@ export const authRouter = Router();
 // target in the API — the generous global limiter in app.ts (100 req /
 // 15 min, shared across every route including /health) is not calibrated
 // to that. This budget applies independently, on top of the global one.
+//
+// The handler routes through errorHandler (issue #22) so the response uses
+// the shared error envelope instead of express-rate-limit's default body.
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 min
   max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many login attempts, please try again later", code: "LOGIN_RATE_LIMITED" },
+  handler: (_req, _res, next) => {
+    next(
+      new AppError("Too many login attempts, please try again later", {
+        code: "RATE_LIMITED",
+        status: 429,
+        retryable: true,
+      })
+    );
+  },
 });
 
 // SEP-10 challenge lifetime in seconds.

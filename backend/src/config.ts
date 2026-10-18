@@ -1,10 +1,71 @@
 import { z } from "zod";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
+// #41 — CORS origins are validated at startup so a typo (trailing space,
+// missing scheme) fails fast with a clear message instead of silently
+// blocking the web app at request time. Each comma-separated entry is
+// trimmed and must parse as a URL. `exp://` origins (Expo dev) are kept
+// supported — `new URL()` accepts them.
+const corsOriginSchema = z
+  .string()
+  .min(1)
+  .transform((raw, ctx) => {
+    const origins = raw
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+
+    if (origins.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "CORS_ORIGIN must contain at least one origin",
+      });
+      return z.NEVER;
+    }
+
+    for (const origin of origins) {
+      try {
+        // eslint-disable-next-line no-new
+        new URL(origin);
+      } catch {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `CORS_ORIGIN entry "${origin}" is not a valid URL (expected e.g. https://app.globewallet.app or exp://192.168.1.10:8081)`,
+        });
+        return z.NEVER;
+      }
+    }
+
+    return origins;
+  });
+
+// #41 — opt-in regex for preview deploys (Vercel/Netlify). Validated as a
+// compilable RegExp so a bad pattern fails startup rather than throwing on
+// the first request.
+const corsOriginRegexSchema = z
+  .string()
+  .min(1)
+  .optional()
+  .transform((raw, ctx) => {
+    if (raw === undefined) return undefined;
+    try {
+      return new RegExp(raw);
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `CORS_ORIGIN_REGEX is not a valid regular expression: ${raw}`,
+      });
+      return z.NEVER;
+    }
+  });
 
 const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(4000),
   HORIZON_URL: z.string().url().default("https://horizon-testnet.stellar.org"),
   NETWORK_PASSPHRASE: z.string().min(1),
-  CORS_ORIGIN: z.string().min(1),
+  CORS_ORIGIN: corsOriginSchema,
+  CORS_ORIGIN_REGEX: corsOriginRegexSchema,
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
   JWT_SECRET: z.string().min(1),
@@ -119,34 +180,33 @@ const envSchema = z.object({
   // permanently lost and a backfill from an archive source is required.
   INDEXER_RETENTION_GAP_LEDGERS: z.coerce.number().int().positive().default(120960),
 
-  // #30 — GET /api/v1/health/details. Per-dependency probe timeout (ms) and
-  // how long the aggregated result is cached (ms). Kept configurable so ops
-  // can tune without a deploy; defaults keep the endpoint under ~2s.
-  HEALTH_CHECK_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
-  HEALTH_CACHE_TTL_MS: z.coerce.number().int().min(0).default(10000),
-
-  // #32 — SEP-10 Web Authentication. Users prove control of their Stellar
-  // account by signing a server-issued challenge, and the API issues a JWT
-  // with `sub = account` instead of the shared API_KEY identity.
-  //
-  // Secret key (S...) of the server account that signs challenges. Optional
-  // so the API can still boot without it; /auth/challenge and /auth/token
-  // respond 503 until set.
-  SEP10_SIGNING_SECRET: z
-    .string()
-    .regex(
-      /^S[A-Z2-7]{55}$/,
-      "must be a valid Stellar secret key (S followed by 55 base32 characters)"
-    )
-    .optional(),
-  // Home domain of the service, embedded in the challenge's manage_data
-  // name ("<HOME_DOMAIN> auth") per SEP-10.
-  HOME_DOMAIN: z.string().min(1).default("globewallet.app"),
-  // Value of the challenge's web_auth_domain operation, and the domain
-  // advertised in stellar.toml. Defaults to HOME_DOMAIN when unset.
-  WEB_AUTH_DOMAIN: z.string().min(1).optional(),
-  // How long a challenge stays valid, in seconds (SEP-10 recommends 300).
-  SEP10_CHALLENGE_TTL_SECONDS: z.coerce.number().int().positive().default(300),
+  // #16 — interactive API docs (Swagger UI at /api/docs, raw spec at
+  // /api/openapi.json). Defaults to enabled outside production and disabled
+  // in production so a prod build never exposes docs unless explicitly
+  // opted in via ENABLE_API_DOCS=true.
+  ENABLE_API_DOCS: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => (v === undefined ? process.env.NODE_ENV !== "production" : v === "true")),
 });
 
 export const config = envSchema.parse(process.env);
+
+// Read the package version once at boot. Resolved relative to this file so it
+// works both under ts-node (src/) and compiled output (dist/).
+function readPackageVersion(): string {
+  try {
+    const pkgPath = join(__dirname, "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version ?? "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+}
+
+const packageVersion = readPackageVersion();
+const [, packageMinor = "0"] = packageVersion.split(".");
+
+// API major version is fixed by the URL prefix; minor tracks package.json.
+export const API_MAJOR_VERSION = 1;
+export const API_VERSION = `${API_MAJOR_VERSION}.${packageMinor}`;

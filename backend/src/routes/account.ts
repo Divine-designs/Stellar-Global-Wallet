@@ -10,6 +10,49 @@ import { getDb } from "../db";
 import { jwtAuth } from "../middleware/jwtAuth";
 import { MAX_EXPORT_RANGE_MS, streamTransactionCsv } from "../services/transactionExport";
 
+// #24 — shared cursor pagination contract. `cursor` is an opaque paging token
+// (e.g. a Horizon cursor) that is passed through untouched; `limit` is capped
+// at MAX_PAGE_LIMIT. Lists respond with `items` + `nextCursor`.
+export const MAX_PAGE_LIMIT = 100;
+export const DEFAULT_PAGE_LIMIT = 20;
+
+export interface PageQuery {
+  cursor?: string;
+  limit?: number;
+}
+
+export interface Page<T> {
+  items: T[];
+  nextCursor: string | null;
+}
+
+/**
+ * Build a `Page<T>` from a list of items and the opaque next-page token.
+ * The cursor is never parsed — it is forwarded verbatim to the caller.
+ */
+export function paginate<T>(items: T[], nextCursor: string | null | undefined): Page<T> {
+  return {
+    items,
+    nextCursor: nextCursor ?? null,
+  };
+}
+
+/**
+ * Validate and normalise a `PageQuery` from raw request query params.
+ * Throws a 400 `VALIDATION_ERROR` when `limit` exceeds MAX_PAGE_LIMIT.
+ */
+export function parsePageQuery(raw: { cursor?: unknown; limit?: unknown }): PageQuery {
+  const limit = raw.limit === undefined ? undefined : Number(raw.limit);
+  if (limit !== undefined && (!Number.isInteger(limit) || limit < 1 || limit > MAX_PAGE_LIMIT)) {
+    throw new AppError("limit must be an integer between 1 and 100", {
+      code: "VALIDATION_ERROR",
+      status: 400,
+    });
+  }
+  const cursor = typeof raw.cursor === "string" && raw.cursor.length > 0 ? raw.cursor : undefined;
+  return { cursor, limit };
+}
+
 // #68 — user preferences schema. Only these keys are allowed; unknown keys
 // are rejected so the stored JSONB stays predictable across web and mobile.
 const preferencesSchema = z
@@ -161,17 +204,25 @@ export function createAccountRouter(stellar: StellarService): Router {
     param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
     query("limit")
       .optional()
-      .isInt({ min: 1, max: 100 })
+      .isInt({ min: 1, max: MAX_PAGE_LIMIT })
       .withMessage("limit must be an integer between 1 and 100")
       .toInt(),
     async (req, res, next) => {
       try {
         assertValidRequest(req);
-        const limit = (req.query.limit as number | undefined) ?? 20;
-        const cursor = req.query.cursor as string | undefined;
-        const result = await stellar.getTransactions(req.params.publicKey, { limit, cursor });
-        res.json({ 
-          transactions: result.transactions.map(withDecodedMuxed),
+        const { limit, cursor } = parsePageQuery({
+          cursor: req.query.cursor,
+          limit: req.query.limit,
+        });
+        const result = await stellar.getTransactions(req.params.publicKey, {
+          limit: limit ?? DEFAULT_PAGE_LIMIT,
+          cursor,
+        });
+        const page = paginate(result.transactions.map(withDecodedMuxed), result.next);
+        res.json({
+          ...page,
+          // @deprecated — use `items` + `nextCursor`. Kept for one version.
+          transactions: page.items,
           next: result.next,
           hasMore: result.hasMore,
         });
@@ -229,57 +280,33 @@ export function createAccountRouter(stellar: StellarService): Router {
     param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
     query("limit")
       .optional()
-      .isInt({ min: 1, max: 100 })
+      .isInt({ min: 1, max: MAX_PAGE_LIMIT })
       .withMessage("limit must be an integer between 1 and 100")
       .toInt(),
     async (req, res, next) => {
       try {
         assertValidRequest(req);
-        
-
-  // #68 — user preferences (currency, language, hidden assets, notifications).
-  // Stored per-account in the preferences table so they sync across devices.
-  accountRouter.get("/:publicKey/preferences", async (req, res, next) => {
-    try {
-      const account = req.params.publicKey;
-      if (!isGAddress(account)) {
-        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
+        const { limit, cursor } = parsePageQuery({
+          cursor: req.query.cursor,
+          limit: req.query.limit,
+        });
+        const feed = await getUnifiedActivityFeed(stellar, req.params.publicKey, {
+          limit: limit ?? DEFAULT_PAGE_LIMIT,
+          cursor,
+        });
+        const page = paginate(feed.items, feed.nextCursor);
+        res.json({
+          ...page,
+          // @deprecated — use `items` + `nextCursor`. Kept for one version.
+          payments: page.items,
+          next: feed.nextCursor,
+          hasMore: feed.nextCursor !== null,
+        });
+      } catch (err) {
+        next(err);
       }
-      const db = getDb();
-      const row = await db("preferences").where({ account }).first();
-      const data = (row?.data as Preferences | undefined) ?? {};
-      res.json({
-        account,
-        preferences: data,
-        updatedAt: row?.updated_at ?? null,
-      });
-    } catch (err) {
-      next(err);
     }
-  });
-
-  accountRouter.put("/:publicKey/preferences", async (req, res, next) => {
-    try {
-      const account = req.params.publicKey;
-      if (!isGAddress(account)) {
-        throw new AppError("VALIDATION_ERROR", 400, publicKeyMessage);
-      }
-      const preferences = parsePreferences(req.body);
-      const db = getDb();
-      const now = new Date();
-      await db("preferences")
-        .insert({ account, data: preferences, updated_at: now })
-        .onConflict("account")
-        .merge({ data: preferences, updated_at: now });
-      res.json({
-        account,
-        preferences,
-        updatedAt: now.toISOString(),
-      });
-    } catch (err) {
-      next(err);
-    }
-  });
+  );
 
   return accountRouter;
 }
