@@ -49,6 +49,12 @@ export function createApp(
 ) {
   const app = express();
 
+  // #29 — weak ETags let polling clients (dashboard balances/assets) cheaply
+  // revalidate with If-None-Match and get a 304 instead of a full payload.
+  // Express computes a weak ETag from the JSON body by default; make it
+  // explicit so the behaviour is documented and stable.
+  app.set("etag", "weak");
+
   // Must be set before any middleware that reads req.ip (rate limiter
   // below, and anything else added later) — see issue #90. The hop count
   // is configured via TRUST_PROXY_HOPS (config.ts) rather than hardcoded

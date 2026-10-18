@@ -87,6 +87,7 @@ components:
       type: string
       pattern: "^G[A-Z2-7]{55}$"
       description: Checksum-validated Stellar account ID (G...).
+      example: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
     Asset:
       type: string
       description: '"XLM" or "CODE:ISSUER". Defaults to XLM when omitted.'

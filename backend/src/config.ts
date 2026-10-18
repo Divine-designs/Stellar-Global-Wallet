@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 // #41 — CORS origins are validated at startup so a typo (trailing space,
 // missing scheme) fails fast with a clear message instead of silently
@@ -189,3 +191,22 @@ const envSchema = z.object({
 });
 
 export const config = envSchema.parse(process.env);
+
+// Read the package version once at boot. Resolved relative to this file so it
+// works both under ts-node (src/) and compiled output (dist/).
+function readPackageVersion(): string {
+  try {
+    const pkgPath = join(__dirname, "..", "package.json");
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: string };
+    return pkg.version ?? "1.0.0";
+  } catch {
+    return "1.0.0";
+  }
+}
+
+const packageVersion = readPackageVersion();
+const [, packageMinor = "0"] = packageVersion.split(".");
+
+// API major version is fixed by the URL prefix; minor tracks package.json.
+export const API_MAJOR_VERSION = 1;
+export const API_VERSION = `${API_MAJOR_VERSION}.${packageMinor}`;

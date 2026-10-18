@@ -7,8 +7,8 @@ Express + TypeScript API for the Stellar Global Wallet.
 ```bash
 cp .env.example .env          # testnet defaults + a live demo contract ID
 npm install
-npm run dev                   # API on http://localhost:4000
-npm test                      # Jest suite
+npm run dev     # API on http://localhost:4000
+npm test
 npm run type-check
 ```
 
