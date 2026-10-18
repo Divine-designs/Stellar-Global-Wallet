@@ -45,3 +45,39 @@ describe("isValidMemoText (from @globe-wallet/sdk, used in routes/wallet.ts)", (
     }
   );
 });
+
+/**
+ * Issue #25: amounts must never be returned as JSON numbers. This guards the
+ * OpenAPI spec so no `amount`/`balance`/`limit` field (or any field whose name
+ * ends in one of those) is declared with `type: number`/`type: integer`.
+ * Amounts are decimal strings with 7 dp; base-unit (stroop) values use the
+ * `Amount` schema's `{ value, decimals }` form.
+ */
+const openapiPath = path.join(__dirname, "..", "..", "docs", "openapi.yaml");
+const AMOUNT_FIELD = /(amount|balance|limit)$/i;
+
+describe("OpenAPI amount fields (issue #25)", () => {
+  const spec = readFileSync(openapiPath, "utf8");
+  const lines = spec.split("\n");
+
+  it("declares no amount/balance/limit field as a numeric type", () => {
+    const offenders: string[] = [];
+    lines.forEach((line, index) => {
+      const fieldMatch = line.match(/^(\s*)([A-Za-z0-9_]+):\s*$/);
+      if (!fieldMatch) return;
+      const [, indent, field] = fieldMatch;
+      if (!AMOUNT_FIELD.test(field)) return;
+      // Inspect the immediate child lines of this field for a numeric type.
+      for (let i = index + 1; i < lines.length; i += 1) {
+        const child = lines[i];
+        if (child.trim() === "") continue;
+        const childIndent = child.match(/^(\s*)/)?.[1].length ?? 0;
+        if (childIndent <= indent.length) break;
+        if (/^\s*type:\s*(number|integer)\s*$/.test(child)) {
+          offenders.push(`${field} (line ${i + 1})`);
+        }
+      }
+    });
+    expect(offenders).toEqual([]);
+  });
+});

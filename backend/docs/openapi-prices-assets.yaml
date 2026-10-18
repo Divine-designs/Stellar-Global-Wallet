@@ -2,6 +2,12 @@
 # #56, #57). Like openapi-errors.yaml this is a fragment, written to be
 # merged into the full spec once #15 lands; error responses reference the
 # shared envelope and examples in openapi-errors.yaml.
+#
+# Amount convention (#25): every monetary amount is a decimal string, never a
+# JSON number. Stellar amounts use exactly 7 decimal places (stroops).
+# Soroban i128 values are returned as `{ value: '<base units>', decimals: 7 }`.
+# Prices are the documented exception: they are decimal strings that may carry
+# more than 7 decimals (see PriceQuote.price / PriceHistory.points[].price).
 openapi: 3.1.0
 info:
   title: GlobeWallet API — prices and verified assets
@@ -113,12 +119,36 @@ components:
                 message: must be XLM or CODE:ISSUER with a valid Stellar issuer (G...)
                 value: USDC
   schemas:
+    Amount:
+      type: string
+      description: >
+        Stellar amount as a decimal string with exactly 7 decimal places
+        (stroops). Never a JSON number — JS floats cannot represent these
+        exactly. Example: "10.0000000".
+      pattern: "^-?[0-9]+\\.[0-9]{7}$"
+      example: "10.0000000"
+    BaseUnitAmount:
+      type: object
+      description: >
+        Soroban i128 value in base units (stroops) with its scale. `value` is
+        the raw integer as a string; `decimals` is the number of decimal
+        places to apply (7 for Stellar assets).
+      required: [value, decimals]
+      properties:
+        value: { type: string, pattern: "^-?[0-9]+$", example: "10000000" }
+        decimals: { type: integer, const: 7, example: 7 }
     PriceQuote:
       type: object
       required: [asset, price, currency, source, updatedAt]
       properties:
         asset: { type: string, description: "Canonical id: XLM or CODE:ISSUER", example: XLM }
-        price: { type: [string, "null"], description: USD per unit as a decimal string, example: "0.1132" }
+        price:
+          type: [string, "null"]
+          description: >
+            USD per unit as a decimal string. Prices are the documented
+            exception to the 7-dp amount convention and may carry more than
+            7 decimals.
+          example: "0.1132"
         currency: { type: string, const: USD }
         source: { type: string, enum: [stellar_dex, coingecko, unavailable] }
         updatedAt: { type: [string, "null"], format: date-time }
@@ -142,5 +172,10 @@ components:
             required: [t, price, filled]
             properties:
               t: { type: string, format: date-time, description: Start of the interval }
-              price: { type: [string, "null"], description: Close price in USD; null before the first trade in the window }
+              price:
+                type: [string, "null"]
+                description: >
+                  Close price in USD as a decimal string; null before the
+                  first trade in the window. Like PriceQuote.price, prices
+                  may carry more than 7 decimals.
               filled: { type: boolean, description: True when no trade occurred and the previous price was carried forward }
