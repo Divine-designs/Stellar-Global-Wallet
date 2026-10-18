@@ -102,6 +102,25 @@ export function createApp(
   // #93 — resolve Accept-Language into req.locale for all routes.
   app.use(localeMiddleware);
 
+  // #40 — the deprecated `x-api-key` shared-secret bypass has been removed.
+  // Protected routes now require per-user JWT auth (Bearer token or
+  // httpOnly cookie session via /api/v1/auth/login). Any request that still
+  // sends `x-api-key` is rejected outright rather than silently ignored, so
+  // integrators relying on the old pattern fail loudly instead of appearing
+  // to work. This runs before the routers so no route can ever accept it.
+  app.use((req, _res, next) => {
+    if (req.header("x-api-key") !== undefined) {
+      next(
+        new UnauthorizedError(
+          "The x-api-key authentication scheme has been removed; use JWT auth via /api/v1/auth/login",
+          "API_KEY_REMOVED"
+        )
+      );
+      return;
+    }
+    next();
+  });
+
   // Health
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
 

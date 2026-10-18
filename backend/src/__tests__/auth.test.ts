@@ -156,6 +156,25 @@ describe("wallet routes with JWT", () => {
   });
 });
 
+describe("x-api-key is no longer accepted on protected routes (#40)", () => {
+  it("rejects x-api-key on /wallet/send/build with 401", async () => {
+    const res = await request(app)
+      .post("/api/v1/wallet/send/build")
+      .set("x-api-key", "test-api-key")
+      .send({});
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("AUTH_HEADER_INVALID");
+  });
+
+  it("rejects x-api-key on /wallet/keypair with 401", async () => {
+    const res = await request(app)
+      .post("/api/v1/wallet/keypair")
+      .set("x-api-key", "test-api-key");
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe("AUTH_HEADER_INVALID");
+  });
+});
+
 describe("recovery execution revokes old-account sessions (#38)", () => {
   const oldAccount = "GOLDACCOUNT000000000000000000000000000000000000000000";
   const newOwner = "GNEWOWNER0000000000000000000000000000000000000000000000";
