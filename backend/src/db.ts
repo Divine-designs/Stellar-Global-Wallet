@@ -35,6 +35,9 @@ export async function ensureAuditTable() {
 
   // #74 — pending multisig transaction store for co-signers.
   await ensurePendingTxsTable(pool);
+
+  // #37 — first-class session records for listing and revoke-all.
+  await ensureSessionsTable(pool);
 }
 
 export async function ensurePendingTxsTable(db: Pool) {
@@ -62,5 +65,30 @@ export async function ensurePendingTxsTable(db: Pool) {
     CREATE INDEX IF NOT EXISTS pending_txs_expires_at_idx
       ON pending_txs (expires_at)
       WHERE status = 'pending'
+  `);
+}
+
+export async function ensureSessionsTable(db: Pool) {
+  await db.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      id UUID PRIMARY KEY,
+      account VARCHAR(56) NOT NULL,
+      refresh_hash VARCHAR(64) NOT NULL,
+      user_agent TEXT,
+      ip_hash VARCHAR(64),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      revoked_at TIMESTAMPTZ
+    )
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS sessions_account_idx
+      ON sessions (account)
+  `);
+
+  await db.query(`
+    CREATE INDEX IF NOT EXISTS sessions_refresh_hash_idx
+      ON sessions (refresh_hash)
   `);
 }

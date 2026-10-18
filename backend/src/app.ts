@@ -81,7 +81,11 @@ export function createApp(
       crossOriginResourcePolicy: { policy: "same-site" },
     })
   );
-  app.use(cors({ origin: config.CORS_ORIGIN.split(",") }));
+  // #34 — cookie session mode needs credentialed CORS. `credentials: true`
+  // is incompatible with a wildcard origin, so the explicit allow-list from
+  // CORS_ORIGIN is required (never `*`). Bearer-token clients are unaffected.
+  const corsOrigins = config.CORS_ORIGIN.split(",").map((o) => o.trim()).filter(Boolean);
+  app.use(cors({ origin: corsOrigins, credentials: true }));
   app.use(morgan("combined"));
 
   // A multi-signed transaction envelope (several signatures on one XDR
@@ -113,6 +117,90 @@ export function createApp(
 
   // #93 — resolve Accept-Language into req.locale for all routes.
   app.use(localeMiddleware);
+
+  // #35 — CSRF protection for cookie-based sessions (double-submit token).
+  // Cookie auth is attached automatically by the browser, so a malicious
+  // site could otherwise trigger state-changing requests. Bearer-token
+  // requests are exempt (the browser never attaches them automatically).
+  // For cookie-authenticated state-changing requests we require the
+  // `X-CSRF-Token` header to match the non-httpOnly `gw_csrf` cookie, and
+  // we verify the `Origin` header against the CORS allow-list.
+  const CSRF_COOKIE = "gw_csrf";
+  const CSRF_HEADER = "x-csrf-token";
+  const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+  function parseCookies(header: string | undefined): Record<string, string> {
+    const out: Record<string, string> = {};
+    if (!header) return out;
+    for (const part of header.split(";")) {
+      const idx = part.indexOf("=");
+      if (idx === -1) continue;
+      const key = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (key) out[key] = decodeURIComponent(value);
+    }
+    return out;
+  }
+
+  // GET /auth/csrf — issues a fresh double-submit token. The cookie is
+  // intentionally non-httpOnly so browser clients can read it and echo it
+  // back in the X-CSRF-Token header. SameSite=Strict is a defence-in-depth
+  // layer on top of the token comparison.
+  app.get("/auth/csrf", (_req, res) => {
+    const token = crypto.randomBytes(32).toString("hex");
+    res.cookie(CSRF_COOKIE, token, {
+      httpOnly: false,
+      sameSite: "strict",
+      secure: config.NODE_ENV === "production",
+      path: "/",
+    });
+    res.json({ csrfToken: token });
+  });
+
+  app.use((req, res, next) => {
+    if (SAFE_METHODS.has(req.method)) return next();
+
+    const cookies = parseCookies(req.headers.cookie);
+    const hasSessionCookie = Boolean(cookies.gw_session);
+    const hasBearer = Boolean(
+      req.headers.authorization && /^Bearer\s+/i.test(req.headers.authorization)
+    );
+
+    // Bearer-authenticated requests are exempt from CSRF: the browser does
+    // not attach Authorization headers automatically, so a cross-site
+    // attacker cannot forge them.
+    if (hasBearer && !hasSessionCookie) return next();
+
+    // Only enforce CSRF for cookie-authenticated requests. Requests with
+    // neither a session cookie nor a Bearer token are left to the normal
+    // auth layer (they'll be rejected as unauthenticated there).
+    if (!hasSessionCookie) return next();
+
+    // Origin check against the CORS allow-list (defence in depth).
+    const origin = req.headers.origin;
+    if (origin && !corsOrigins.includes(origin)) {
+      return res.status(403).json({
+        error: "CSRF_ORIGIN_REJECTED",
+        message: "Origin is not allowed for cookie-authenticated requests",
+      });
+    }
+
+    const headerToken = req.headers[CSRF_HEADER];
+    const cookieToken = cookies[CSRF_COOKIE];
+    if (
+      typeof headerToken !== "string" ||
+      !cookieToken ||
+      headerToken.length !== cookieToken.length ||
+      !crypto.timingSafeEqual(Buffer.from(headerToken), Buffer.from(cookieToken))
+    ) {
+      return res.status(403).json({
+        error: "CSRF_TOKEN_INVALID",
+        message: "Missing or invalid CSRF token",
+      });
+    }
+
+    return next();
+  });
 
   // Health
   app.get("/health", (_req, res) => res.json({ status: "ok" }));
