@@ -4,11 +4,13 @@ import { config } from "../config";
 import { validatePathAssets } from "../validation/stellarAsset";
 import { AccountLock, InProcessAccountLock } from "./locks/accountLock";
 import {
+  DestinationNotFundedError,
   MemoRequiredError,
   NonRetryableHorizonError,
   SequenceConflictError,
 } from "./stellarErrors";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
+import { fromStroops, toStroops } from "../utils/stroops";
 
 // Re-exported for backward compatibility — this used to be declared locally
 // here. The canonical definition now lives in packages/types (issue #107)
@@ -42,6 +44,51 @@ export interface PaymentHistoryItem {
   flags: PaymentFlag[];
 }
 
+/**
+ * Minimum starting balance for a brand-new account: the base reserve (0.5
+ * XLM) x 2 base entries. `createAccount` with less than this fails on-chain
+ * with `op_low_reserve` (#65).
+ */
+export const MIN_STARTING_BALANCE = "1";
+
+/** Base reserve per ledger entry, in XLM. */
+const BASE_RESERVE = "0.5";
+
+/** Which operation the send/build path chose for a destination (#65). */
+export type SendOperationType = "payment" | "createAccount";
+
+/** One pre-signing warning returned by `precheckSend` (#64). */
+export interface SendPrecheckWarning {
+  code:
+    | "DESTINATION_IS_SOURCE"
+    | "SOURCE_NOT_FUNDED"
+    | "DESTINATION_NOT_FUNDED"
+    | "DESTINATION_WILL_BE_CREATED"
+    | "NO_TRUSTLINE"
+    | "TRUSTLINE_NOT_AUTHORIZED"
+    | "MEMO_REQUIRED"
+    | "AMOUNT_EXCEEDS_SPENDABLE";
+  message: string;
+  /** True when submitting as-is would certainly fail or lose funds. */
+  blocking: boolean;
+}
+
+export interface SendPrecheckResult {
+  warnings: SendPrecheckWarning[];
+  /** True when any warning is blocking — clients should not offer "Sign". */
+  blocking: boolean;
+  /** Operation the build endpoints would use for this destination. */
+  operationType: SendOperationType;
+  /** Source's spendable balance of `asset`, or undefined if the source is unfunded. */
+  spendable: string | undefined;
+}
+
+/** Raw Horizon `/payments` record plus its joined parent transaction (#62). */
+export interface PaymentExportRecord {
+  op: StellarSdk.Horizon.ServerApi.OperationRecord;
+  transaction: StellarSdk.Horizon.ServerApi.TransactionRecord | undefined;
+}
+
 /** Maximum number of tx_bad_seq retries before giving up. */
 const MAX_SEQ_RETRIES = 3;
 
@@ -70,6 +117,16 @@ export class StellarService {
       if (hasResponseStatus(err, 404)) {
         throw new NotFoundError(`Account ${publicKey} was not found on Horizon`, "ACCOUNT_NOT_FOUND");
       }
+      throw err;
+    }
+  }
+
+  /** Like `getAccount`, but resolves to `null` instead of throwing on 404. */
+  async loadAccountOrNull(publicKey: string): Promise<StellarSdk.Horizon.AccountResponse | null> {
+    try {
+      return await this.server.loadAccount(publicKey);
+    } catch (err) {
+      if (hasResponseStatus(err, 404)) return null;
       throw err;
     }
   }
@@ -232,11 +289,7 @@ export class StellarService {
   async destinationRequiresMemo(publicKey: string): Promise<boolean> {
     try {
       const account = await this.getAccount(publicKey);
-      const data = account.data_attr as Record<string, string> | undefined;
-      if (data && data["config.memo_required"] === "MQ==") {
-        return true;
-      }
-      return false;
+      return accountRequiresMemo(account);
     } catch {
       // If the account doesn't exist on the network, we can't check —
       // let the send proceed and Horizon will reject if needed.
@@ -325,6 +378,9 @@ export class StellarService {
       );
     }
 
+    // #65 — an unfunded destination needs createAccount, not payment.
+    const { operation } = await this.resolveSendOperation(destinationPublicKey, asset, amount);
+
     // Two concurrent sends from the same source account both read the same
     // starting sequence number and race on submission: the loser gets a
     // bare Horizon tx_bad_seq. Serializing per source account here — load
@@ -338,26 +394,266 @@ export class StellarService {
       sourceKeypair,
       "sendPayment",
       (sourceAccount) => {
-        const stellarAsset =
-          !asset || asset === "XLM"
-            ? StellarSdk.Asset.native()
-            : new StellarSdk.Asset(asset.split(":")[0], asset.split(":")[1]);
         const builder = new StellarSdk.TransactionBuilder(sourceAccount, {
           fee: StellarSdk.BASE_FEE,
           networkPassphrase: this.networkPassphrase,
         })
-          .addOperation(
-            StellarSdk.Operation.payment({
-              destination: destinationPublicKey,
-              asset: stellarAsset,
-              amount,
-            })
-          )
+          .addOperation(operation)
           .setTimeout(30);
         if (memo) builder.addMemo(StellarSdk.Memo.text(memo));
         return builder;
       }
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Issue #65 – createAccount for unfunded destinations
+  // ---------------------------------------------------------------------------
+  // A classic `payment` to an account that doesn't exist fails on-chain with
+  // `op_no_destination` (after the fee is charged). The only way to send to a
+  // new address is `createAccount`, which can only carry native XLM and needs
+  // at least MIN_STARTING_BALANCE. The build/send paths call this to pick the
+  // right operation automatically; anything else is rejected up-front with
+  // DESTINATION_NOT_FUNDED instead of a wasted fee.
+  // ---------------------------------------------------------------------------
+
+  async resolveSendOperation(
+    destinationPublicKey: string,
+    asset: string | undefined,
+    amount: string
+  ): Promise<{ operation: StellarSdk.xdr.Operation; operationType: SendOperationType }> {
+    const stellarAsset = parseAsset(asset);
+    const destination = await this.loadAccountOrNull(destinationPublicKey);
+
+    if (destination) {
+      return {
+        operationType: "payment",
+        operation: StellarSdk.Operation.payment({
+          destination: destinationPublicKey,
+          asset: stellarAsset,
+          amount,
+        }),
+      };
+    }
+
+    if (!stellarAsset.isNative()) {
+      throw new DestinationNotFundedError(
+        `Destination account ${destinationPublicKey} does not exist. Only XLM can be sent to a ` +
+          `new account (at least ${MIN_STARTING_BALANCE} XLM, via createAccount).`,
+        {
+          reason: "NON_NATIVE_ASSET",
+          destination: destinationPublicKey,
+          minimumStartingBalance: MIN_STARTING_BALANCE,
+        }
+      );
+    }
+
+    if (toStroops(amount) < toStroops(MIN_STARTING_BALANCE)) {
+      throw new DestinationNotFundedError(
+        `Destination account ${destinationPublicKey} does not exist. Creating it requires a ` +
+          `starting balance of at least ${MIN_STARTING_BALANCE} XLM.`,
+        {
+          reason: "BELOW_MINIMUM_STARTING_BALANCE",
+          destination: destinationPublicKey,
+          minimumStartingBalance: MIN_STARTING_BALANCE,
+        }
+      );
+    }
+
+    return {
+      operationType: "createAccount",
+      operation: StellarSdk.Operation.createAccount({
+        destination: destinationPublicKey,
+        startingBalance: amount,
+      }),
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Issue #64 – Pre-signing destination checks
+  // ---------------------------------------------------------------------------
+  // Read-only: loads the source and destination once each and reports every
+  // problem that would make the send fail (or lose funds) after signing. Never
+  // throws for a "bad" send — those come back as warnings — only for invalid
+  // input or Horizon being unreachable.
+  // ---------------------------------------------------------------------------
+
+  async precheckSend(params: {
+    sourcePublicKey: string;
+    destinationPublicKey: string;
+    amount: string;
+    asset?: string;
+    memo?: string;
+  }): Promise<SendPrecheckResult> {
+    const { sourcePublicKey, destinationPublicKey, amount, asset, memo } = params;
+    const stellarAsset = parseAsset(asset);
+    const warnings: SendPrecheckWarning[] = [];
+    const assetLabel = stellarAsset.isNative() ? "XLM" : stellarAsset.getCode();
+
+    const [source, destination] = await Promise.all([
+      this.loadAccountOrNull(sourcePublicKey),
+      sourcePublicKey === destinationPublicKey
+        ? Promise.resolve(null)
+        : this.loadAccountOrNull(destinationPublicKey),
+    ]);
+    const destinationAccount = sourcePublicKey === destinationPublicKey ? source : destination;
+
+    if (sourcePublicKey === destinationPublicKey) {
+      warnings.push({
+        code: "DESTINATION_IS_SOURCE",
+        message: "The destination is the same account you are sending from.",
+        blocking: false,
+      });
+    }
+
+    // --- Source: funded and has enough spendable balance -------------------
+    let spendable: string | undefined;
+    if (!source) {
+      warnings.push({
+        code: "SOURCE_NOT_FUNDED",
+        message: `Source account ${sourcePublicKey} does not exist on the network.`,
+        blocking: true,
+      });
+    } else {
+      spendable = spendableBalance(source, stellarAsset);
+      if (spendable === undefined) {
+        warnings.push({
+          code: "AMOUNT_EXCEEDS_SPENDABLE",
+          message: `Source account has no ${assetLabel} balance (no trustline).`,
+          blocking: true,
+        });
+      } else if (toStroops(amount) > toStroops(spendable)) {
+        warnings.push({
+          code: "AMOUNT_EXCEEDS_SPENDABLE",
+          message:
+            `Amount ${amount} ${assetLabel} exceeds the spendable balance of ${spendable} ` +
+            `${assetLabel}` +
+            (stellarAsset.isNative() ? " (after the minimum reserve and network fee)." : "."),
+          blocking: true,
+        });
+      }
+    }
+
+    // --- Destination: exists / trustline / SEP-29 memo ----------------------
+    let operationType: SendOperationType = "payment";
+    if (!destinationAccount) {
+      if (!stellarAsset.isNative()) {
+        warnings.push({
+          code: "DESTINATION_NOT_FUNDED",
+          message:
+            `Destination account does not exist. Only XLM (at least ${MIN_STARTING_BALANCE} XLM) ` +
+            "can be sent to a new account.",
+          blocking: true,
+        });
+      } else if (toStroops(amount) < toStroops(MIN_STARTING_BALANCE)) {
+        warnings.push({
+          code: "DESTINATION_NOT_FUNDED",
+          message:
+            `Destination account does not exist. Creating it requires at least ` +
+            `${MIN_STARTING_BALANCE} XLM.`,
+          blocking: true,
+        });
+      } else {
+        operationType = "createAccount";
+        warnings.push({
+          code: "DESTINATION_WILL_BE_CREATED",
+          message:
+            "Destination account does not exist yet. It will be created and funded with this amount.",
+          blocking: false,
+        });
+      }
+    } else {
+      if (!stellarAsset.isNative() && stellarAsset.getIssuer() !== destinationPublicKey) {
+        const trustline = findTrustline(destinationAccount, stellarAsset);
+        if (!trustline) {
+          warnings.push({
+            code: "NO_TRUSTLINE",
+            message: `Destination account does not trust ${assetLabel} and cannot receive it.`,
+            blocking: true,
+          });
+        } else if (trustline.is_authorized === false) {
+          warnings.push({
+            code: "TRUSTLINE_NOT_AUTHORIZED",
+            message: `Destination's ${assetLabel} trustline is not authorized by the issuer.`,
+            blocking: true,
+          });
+        }
+      }
+
+      // Same SEP-29 rule `destinationRequiresMemo` / `sendPayment` enforce.
+      if (accountRequiresMemo(destinationAccount) && !memo) {
+        warnings.push({
+          code: "MEMO_REQUIRED",
+          message:
+            "The destination requires a memo (SEP-29), e.g. an exchange deposit ID. " +
+            "Sending without one may lose funds.",
+          blocking: true,
+        });
+      }
+    }
+
+    return {
+      warnings,
+      blocking: warnings.some((w) => w.blocking),
+      operationType,
+      spendable,
+    };
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Issue #62 – Paged payment iterator for CSV export
+  // ---------------------------------------------------------------------------
+  // Yields one Horizon page at a time (newest first) so the caller can stream
+  // rows out and drop each page before fetching the next — memory stays
+  // bounded by `pageSize` no matter how large the export is. Stops once the
+  // page reaches records older than `from`; records newer than `to` are
+  // skipped (Horizon's /payments has no date filter, only cursors).
+  // ---------------------------------------------------------------------------
+
+  async *iteratePaymentsForExport(
+    publicKey: string,
+    options: { from: Date; to: Date; pageSize?: number }
+  ): AsyncGenerator<PaymentExportRecord[]> {
+    const pageSize = options.pageSize ?? 200;
+    const fromMs = options.from.getTime();
+    const toMs = options.to.getTime();
+    let cursor: string | undefined;
+
+    for (;;) {
+      let builder = this.server
+        .payments()
+        .forAccount(publicKey)
+        .join("transactions")
+        .limit(pageSize)
+        .order("desc");
+      if (cursor) builder = builder.cursor(cursor);
+
+      const page = await builder.call();
+      const records = page.records;
+      if (records.length === 0) return;
+
+      const batch: PaymentExportRecord[] = [];
+      let reachedStart = false;
+      for (const op of records) {
+        const createdMs = Date.parse(op.created_at);
+        if (createdMs > toMs) continue;
+        if (createdMs < fromMs) {
+          reachedStart = true;
+          break;
+        }
+        let transaction: StellarSdk.Horizon.ServerApi.TransactionRecord | undefined;
+        try {
+          transaction = await op.transaction();
+        } catch (err) {
+          console.warn(`[stellar] failed to read joined transaction for operation ${op.id}: ${err}`);
+        }
+        batch.push({ op, transaction });
+      }
+
+      if (batch.length > 0) yield batch;
+      if (reachedStart || records.length < pageSize) return;
+      cursor = (records[records.length - 1] as unknown as { paging_token: string }).paging_token;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -520,26 +816,26 @@ export class StellarService {
     amount: string;
     asset?: string;
     memo?: string;
-  }): Promise<{ xdr: string; hash: string }> {
+  }): Promise<{ xdr: string; hash: string; operationType: SendOperationType }> {
     const { sourceSecretKey, destinationPublicKey, amount, asset, memo } = params;
     const sourceKeypair = StellarSdk.Keypair.fromSecret(sourceSecretKey);
     const sourcePublicKey = sourceKeypair.publicKey();
 
+    // #65 — an unfunded destination needs createAccount, not payment.
+    const { operation, operationType } = await this.resolveSendOperation(
+      destinationPublicKey,
+      asset,
+      amount
+    );
+
     return this.accountLock.withLock(sourcePublicKey, async () => {
       const sourceAccount = await this.getAccount(sourcePublicKey);
-      const stellarAsset = parseAsset(asset);
 
       const builder = new StellarSdk.TransactionBuilder(sourceAccount, {
         fee: StellarSdk.BASE_FEE,
         networkPassphrase: this.networkPassphrase,
       })
-        .addOperation(
-          StellarSdk.Operation.payment({
-            destination: destinationPublicKey,
-            asset: stellarAsset,
-            amount,
-          })
-        )
+        .addOperation(operation)
         .setTimeout(30);
 
       if (memo) builder.addMemo(StellarSdk.Memo.text(memo));
@@ -550,6 +846,7 @@ export class StellarService {
       return {
         xdr: tx.toXDR(),
         hash: tx.hash().toString("hex"),
+        operationType,
       };
     });
   }
@@ -652,6 +949,70 @@ function parseAsset(assetStr: string | undefined): StellarSdk.Asset {
   if (!assetStr || assetStr === "XLM") return StellarSdk.Asset.native();
   const [code, issuer] = assetStr.split(":");
   return new StellarSdk.Asset(code, issuer);
+}
+
+/** SEP-29: `config.memo_required` data entry set to "1" (base64 "MQ=="). */
+export function accountRequiresMemo(account: StellarSdk.Horizon.AccountResponse): boolean {
+  const data = account.data_attr as Record<string, string> | undefined;
+  return data?.["config.memo_required"] === "MQ==";
+}
+
+/** The subset of a Horizon balance line the precheck reads. */
+interface BalanceLine {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  balance: string;
+  selling_liabilities?: string;
+  is_authorized?: boolean;
+}
+
+function findTrustline(
+  account: StellarSdk.Horizon.AccountResponse,
+  asset: StellarSdk.Asset
+): BalanceLine | undefined {
+  return (account.balances as unknown as BalanceLine[]).find(
+    (b) =>
+      (b.asset_type === "credit_alphanum4" || b.asset_type === "credit_alphanum12") &&
+      b.asset_code === asset.getCode() &&
+      b.asset_issuer === asset.getIssuer()
+  );
+}
+
+/**
+ * What the account can actually send of `asset`, or undefined if it holds no
+ * such balance. For XLM: balance - minimum reserve - selling liabilities -
+ * one base fee. For issued assets: balance - selling liabilities. An issuer
+ * sending its own asset has unlimited supply, so it returns its own cap.
+ */
+function spendableBalance(
+  account: StellarSdk.Horizon.AccountResponse,
+  asset: StellarSdk.Asset
+): string | undefined {
+  if (!asset.isNative() && asset.getIssuer() === account.account_id) {
+    return "922337203685.4775807";
+  }
+
+  if (asset.isNative()) {
+    const native = (account.balances as unknown as BalanceLine[]).find((b) => b.asset_type === "native");
+    if (!native) return undefined;
+    const extra = account as unknown as { num_sponsoring?: number; num_sponsored?: number };
+    const entries =
+      2n +
+      BigInt(account.subentry_count) +
+      BigInt(extra.num_sponsoring ?? 0) -
+      BigInt(extra.num_sponsored ?? 0);
+    const reserve = entries * toStroops(BASE_RESERVE);
+    const liabilities = toStroops(native.selling_liabilities ?? "0");
+    const available =
+      toStroops(native.balance) - reserve - liabilities - BigInt(StellarSdk.BASE_FEE);
+    return fromStroops(available > 0n ? available : 0n);
+  }
+
+  const line = findTrustline(account, asset);
+  if (!line) return undefined;
+  const available = toStroops(line.balance) - toStroops(line.selling_liabilities ?? "0");
+  return fromStroops(available > 0n ? available : 0n);
 }
 
 function parsePathAssets(path: string[] | undefined): StellarSdk.Asset[] {

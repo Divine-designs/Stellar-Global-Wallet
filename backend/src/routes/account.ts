@@ -7,6 +7,8 @@ import { getUnifiedActivityFeed } from "../services/activityFeed";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
 import { AppError } from "../errors/appError";
 import { getDb } from "../db";
+import { jwtAuth } from "../middleware/jwtAuth";
+import { MAX_EXPORT_RANGE_MS, streamTransactionCsv } from "../services/transactionExport";
 
 // #68 — user preferences schema. Only these keys are allowed; unknown keys
 // are rejected so the stored JSONB stays predictable across web and mobile.
@@ -94,6 +96,45 @@ export function createAccountRouter(stellar: StellarService): Router {
           next: result.next,
           hasMore: result.hasMore,
         });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #62 — CSV statement export (tax/accounting). Streams rows page by page;
+  // `from`/`to` are ISO-8601 timestamps, default to the last 365 days, and
+  // may span at most MAX_EXPORT_RANGE_MS. Authenticated because statements
+  // are a user-facing download, unlike the public read endpoints above.
+  accountRouter.get(
+    "/:publicKey/transactions/export.csv",
+    jwtAuth,
+    param("publicKey").custom(isGAddress).withMessage(publicKeyMessage),
+    query("from").optional().isISO8601({ strict: true }).withMessage("from must be an ISO-8601 date"),
+    query("to").optional().isISO8601({ strict: true }).withMessage("to must be an ISO-8601 date"),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const to = req.query.to ? new Date(req.query.to as string) : new Date();
+        const from = req.query.from
+          ? new Date(req.query.from as string)
+          : new Date(to.getTime() - 365 * 24 * 60 * 60 * 1000);
+
+        if (from.getTime() > to.getTime()) {
+          throw new AppError("from must be before to", {
+            code: "INVALID_EXPORT_RANGE",
+            status: 400,
+          });
+        }
+        if (to.getTime() - from.getTime() > MAX_EXPORT_RANGE_MS) {
+          throw new AppError("Export range must not exceed 1 year", {
+            code: "EXPORT_RANGE_TOO_LARGE",
+            status: 400,
+            details: { maxRangeDays: 366 },
+          });
+        }
+
+        await streamTransactionCsv(res, stellar, { publicKey: req.params.publicKey, from, to });
       } catch (err) {
         next(err);
       }
