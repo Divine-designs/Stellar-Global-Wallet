@@ -9,6 +9,7 @@ export interface ValidationIssue {
 export interface AppErrorOptions {
   code: string;
   details?: unknown;
+  requestId?: string;
   retryable?: boolean;
   status: number;
 }
@@ -16,6 +17,7 @@ export interface AppErrorOptions {
 export class AppError extends Error {
   readonly code: string;
   readonly details?: unknown;
+  readonly requestId?: string;
   readonly retryable?: boolean;
   readonly status: number;
 
@@ -24,6 +26,7 @@ export class AppError extends Error {
     this.name = new.target.name;
     this.code = options.code;
     this.details = options.details;
+    this.requestId = options.requestId;
     this.retryable = options.retryable;
     this.status = options.status;
   }

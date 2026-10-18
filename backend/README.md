@@ -1,46 +1,47 @@
-# Backend
+# Backend API
 
 Express + TypeScript API for the Stellar Global Wallet.
-
-## API versioning
-
-The API is versioned in the URL (`/api/v1`) and every response carries an
-`X-API-Version` header. See [docs/versioning.md](docs/versioning.md) for the
-full policy on breaking vs. non-breaking changes and the deprecation window.
 
 ## Getting started
 
 ```bash
-cp .env.example .env
+cp .env.example .env          # testnet defaults + a live demo contract ID
 npm install
 npm run dev     # API on http://localhost:4000
 npm test
 npm run type-check
 ```
 
-## Mock API server
+## API documentation
 
-Frontend work can start before every endpoint is live by mocking from the
-OpenAPI spec. The mock server is driven by `docs/openapi.yaml` and serves the
-realistic `examples` defined for each schema (accounts with XLM + USDC, a
-pending recovery, etc.), so responses are typed and predictable.
+The OpenAPI 3.1 contract lives in [`openapi.yaml`](./openapi.yaml). When the docs
+are enabled, the server serves:
+
+- **Interactive docs** — `GET /api/docs` (Swagger UI, backed by the spec below)
+- **Raw spec** — `GET /api/openapi.json` (the YAML converted to JSON once at startup)
+
+Docs are gated by the `ENABLE_API_DOCS` environment variable:
+
+| `ENABLE_API_DOCS` | `NODE_ENV`  | Docs served |
+| ----------------- | ----------- | ----------- |
+| unset             | production  | no (404)    |
+| unset             | anything else | yes       |
+| `true`            | any         | yes         |
+| `false`           | any         | no (404)    |
+
+So a production build does **not** expose the docs by default; set
+`ENABLE_API_DOCS=true` to opt in. When disabled, both routes return `404`.
+
+Helmet's default Content-Security-Policy blocks the inline scripts Swagger UI
+needs, so the docs routes get a route-specific CSP that allows them. The rest of
+the API keeps the strict default policy.
+
+## Tests
 
 ```bash
-npm run mock    # Prism on http://localhost:4010
+npm test
 ```
 
-This runs `prism mock docs/openapi.yaml -p 4010 --dynamic=false`, which returns
-the static examples from the spec. Point the web/mobile apps at
-`http://localhost:4010` to develop offline without testnet flakiness.
-
-### Forcing error examples
-
-Each operation documents error responses (e.g. `429`, `404`, `400`). Use
-Prism's `Prefer` header to force a specific response code:
-
-```bash
-curl -H 'Prefer: code=429' http://localhost:4010/api/v1/accounts/me
-```
-
-This is useful for exercising rate-limit and error UI paths without waiting for
-the real backend to fail.
+Route tests use [supertest](https://github.com/ladjs/supertest) and cover the
+happy path, validation failures and auth failures. Schema-conformance tests
+check responses against `openapi.yaml`.

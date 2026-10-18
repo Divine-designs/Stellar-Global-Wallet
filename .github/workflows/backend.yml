@@ -46,4 +46,7 @@ jobs:
         run: npm run i18n:check --workspace=packages/i18n
 
       - name: Test
+        # Route tests assert supertest responses against backend/openapi.yaml
+        # via jest-openapi (see backend/tests/env.setup.ts), so this step
+        # fails CI when a route and the OpenAPI spec drift apart.
         run: npm test --workspace backend
