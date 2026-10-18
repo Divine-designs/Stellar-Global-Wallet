@@ -244,45 +244,57 @@ describe("POST /api/v1/auth/logout", () => {
   });
 });
 
-describe("wallet routes with JWT", () => {
-  it("rejects unauthenticated request", async () => {
-    const res = await request(app)
-      .post("/api/v1/wallet/keypair")
-      .expect(401);
-    expect(res.body.code).toBe("AUTH_HEADER_INVALID");
-  });
-
-  it("accepts authenticated request with valid Bearer token", async () => {
+describe("GET /api/v1/auth/me", () => {
+  it("returns the current session identity and expiry", async () => {
     const login = await request(app)
       .post("/api/v1/auth/login")
-      .set("x-api-key", "test-api-key");
+      .set("x-api-key", "test-api-key")
+      .expect(200);
     const { accessToken } = login.body;
 
     const res = await request(app)
-      .post("/api/v1/wallet/keypair")
+      .get("/api/v1/auth/me")
       .set("Authorization", `Bearer ${accessToken}`)
       .expect(200);
-    expect(res.body.publicKey).toBe("GABC1234");
-    expect(res.body.secretKey).toBe("SABC1234");
+
+    expect(res.body.account).toBe("api-key-user");
+    expect(res.body.authMethod).toBe("api-key");
+    expect(typeof res.body.issuedAt).toBe("number");
+    expect(typeof res.body.expiresAt).toBe("number");
+    expect(res.body.expiresAt).toBeGreaterThan(res.body.issuedAt);
+    expect(typeof res.body.sessionId).toBe("string");
+    expect(res.body.sessionId.length).toBeGreaterThan(0);
   });
 
-  it("accepts authenticated request via access cookie", async () => {
-    const login = await request(app)
-      .post("/api/v1/auth/token?mode=cookie")
-      .set("x-api-key", "test-api-key")
-      .expect(200);
+  it("returns 401 when not signed in", async () => {
+    const res = await request(app)
+      .get("/api/v1/auth/me")
+      .expect(401);
+    expect(res.body.code).toBe("TOKEN_MISSING");
+  });
 
-    const accessCookie = getSetCookies(login)
-      .map((c) => c.split(";")[0])
-      .find(
-        (c) => c.startsWith(`${ACCESS_COOKIE}=`) || c.startsWith(`${DEV_ACCESS_COOKIE}=`)
-      );
-    expect(accessCookie).toBeTruthy();
+  it("returns 401 TOKEN_EXPIRED for an expired token", async () => {
+    const jwt = require("jsonwebtoken");
+    const { config } = require("../config");
+    const expired = jwt.sign(
+      { sub: "api-key-user", authMethod: "api-key", sid: "expired-session" },
+      config.jwtSecret,
+      { expiresIn: -10 }
+    );
 
     const res = await request(app)
-      .post("/api/v1/wallet/keypair")
-      .set("Cookie", accessCookie as string)
-      .expect(200);
-    expect(res.body.publicKey).toBe("GABC1234");
+      .get("/api/v1/auth/me")
+      .set("Authorization", `Bearer ${expired}`)
+      .expect(401);
+    expect(res.body.code).toBe("TOKEN_EXPIRED");
+  });
+});
+
+describe("wallet routes with JWT", () => {
+  it("rejects unauthenticated request", async () => {
+    const res = await request(app)
+      .get("/api/v1/wallet/balances")
+      .expect(401);
+    expect(res.body.code).toBe("TOKEN_MISSING");
   });
 });
