@@ -63,34 +63,56 @@ function toAppError(error: unknown): AppError {
   return new InternalServerError();
 }
 
-function toErrorBody(error: AppError) {
-  const body: Record<string, unknown> = {
+/**
+ * Single error envelope for every non-2xx response:
+ * `{ error: { code, message, details?, retryable?, requestId } }`.
+ *
+ * `requestId` is read from the response header set by the request-id
+ * middleware (falling back to the request header) so clients can correlate
+ * a failure with server logs. Stack traces are never included.
+ */
+function toErrorBody(error: AppError, requestId?: string) {
+  const inner: Record<string, unknown> = {
     code: error.code,
-    error: error.message,
+    message: error.message,
   };
 
   if (error.details !== undefined) {
-    body.details = error.details;
+    inner.details = error.details;
   }
 
   if (error.retryable !== undefined) {
-    body.retryable = error.retryable;
+    inner.retryable = error.retryable;
   }
 
   if (error instanceof SorobanTransactionError) {
-    body.hash = error.hash;
+    inner.hash = error.hash;
   }
 
-  return body;
+  if (requestId) {
+    inner.requestId = requestId;
+  }
+
+  return { error: inner };
+}
+
+function resolveRequestId(req: Request, res: Response): string | undefined {
+  const fromResponse = res.getHeader("x-request-id");
+  if (typeof fromResponse === "string" && fromResponse.length > 0) {
+    return fromResponse;
+  }
+  const fromRequest = req.header("x-request-id");
+  return fromRequest && fromRequest.length > 0 ? fromRequest : undefined;
 }
 
 export function errorHandler(
   err: unknown,
-  _req: Request,
+  req: Request,
   res: Response,
   _next: NextFunction
 ) {
   console.error(err);
   const error = toAppError(err);
-  res.status(error.status).json(toErrorBody(error));
+  const requestId = resolveRequestId(req, res);
+  res.status(error.status).json(toErrorBody(error, requestId));
 }

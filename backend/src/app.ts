@@ -2,6 +2,7 @@ import express from "express";
 import helmet from "helmet";
 import cors from "cors";
 import morgan from "morgan";
+import crypto from "crypto";
 import { rateLimit } from "express-rate-limit";
 import swaggerUi from "swagger-ui-express";
 import { createWalletRouter } from "./routes/wallet";
@@ -25,9 +26,21 @@ import { config } from "./config";
 import { StellarService } from "./services/stellar";
 import { SorobanService } from "./services/soroban";
 import { GlobeWalletContract } from "./services/contracts/globeWallet";
-import { NotFoundError } from "./errors/appError";
+import { AppError, NotFoundError } from "./errors/appError";
 import { PriceHistoryService, PriceService, createDefaultPriceServices } from "./services/price";
 import { loadOpenApiSpec } from "./openapi";
+
+// #23 — inbound request IDs are only trusted if they match this format.
+// Anything else (newlines, control chars, oversized values) is discarded
+// and replaced with a generated UUID to avoid log injection.
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9-]{8,64}$/;
+
+function resolveRequestId(inbound: unknown): string {
+  if (typeof inbound === "string" && REQUEST_ID_PATTERN.test(inbound)) {
+    return inbound;
+  }
+  return crypto.randomUUID();
+}
 
 export function createApp(
   stellar: StellarService = new StellarService(),
@@ -107,12 +120,25 @@ export function createApp(
   app.use("/api/v1/pending-txs", express.json({ limit: "64kb" }));
   app.use(express.json({ limit: "10kb" }));
 
+  // #22 — every non-2xx response must use the shared error envelope
+  // `{ error: { code, message, details?, retryable?, requestId } }`.
+  // express-rate-limit's default handler writes a plain-text body, so
+  // route the limit through errorHandler via next(AppError) instead.
   app.use(
     rateLimit({
       windowMs: 15 * 60 * 1000, // 15 min
       max: 100,
       standardHeaders: true,
       legacyHeaders: false,
+      handler: (_req, _res, next) => {
+        next(
+          new AppError("Too many requests, please try again later", {
+            code: "RATE_LIMITED",
+            status: 429,
+            retryable: true,
+          })
+        );
+      },
     })
   );
 

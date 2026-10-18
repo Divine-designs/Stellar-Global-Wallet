@@ -4,6 +4,13 @@
 # covers the routes added/changed by #62, #63, #64 and #65 and reuses the
 # shared error envelope + examples from ./openapi-errors.yaml so it can be
 # merged into that spec unchanged.
+#
+# Amount convention (#25): every monetary amount in a response is a JSON
+# string, never a number. Stellar amounts use decimal strings with up to 7
+# decimal places (see `Amount`). Soroban i128 values are returned in base
+# units (stroops) as `{ value: "<integer string>", decimals: 7 }` (see
+# `BaseUnitAmount`). Prices are the exception: they may legitimately need
+# more than 7 decimals and are documented separately (see `Price`).
 openapi: 3.1.0
 info:
   title: GlobeWallet API — send flow & statements
@@ -16,14 +23,66 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+  parameters:
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: >-
+        Optional client-supplied correlation ID. Accepted only when it matches
+        `^[A-Za-z0-9-]{8,64}$`; otherwise the server generates a UUID. The
+        resolved value is always echoed back in the `X-Request-Id` response
+        header and included in error envelopes as `requestId`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
+  headers:
+    X-Request-Id:
+      description: >-
+        Correlation ID for this request. Present on every response (success
+        and error). Use it to find the matching server log line.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9-]{8,64}$'
+        example: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
   schemas:
     ErrorResponse:
       $ref: "./openapi-errors.yaml#/components/schemas/ErrorResponse"
     Amount:
       type: string
       pattern: '^\d+(\.\d{1,7})?$'
-      description: Positive decimal string, at most 7 decimal places. Never a JSON number.
+      description: >-
+        Positive decimal string, at most 7 decimal places. Never a JSON
+        number. Use this for every Stellar amount (balances, limits, fees,
+        spendable, send amounts).
       example: "12.5"
+    BaseUnitAmount:
+      type: object
+      description: >-
+        A Soroban i128 value expressed in base units (stroops). `value` is an
+        integer string (never a JSON number) and `decimals` states how many
+        decimal places to shift by to get the human amount. For Stellar
+        assets `decimals` is 7.
+      required: [value, decimals]
+      properties:
+        value:
+          type: string
+          pattern: '^-?\d+$'
+          description: Integer amount in base units, as a string.
+          example: "10000000"
+        decimals:
+          type: integer
+          minimum: 0
+          description: Number of decimal places the base units represent.
+          example: 7
+    Price:
+      type: string
+      description: >-
+        Price as a decimal string. Unlike `Amount`, prices may legitimately
+        need more than 7 decimal places, so no fixed precision is enforced
+        here; consumers must parse as a decimal, never a float.
+      example: "0.123456789"
     AccountId:
       type: string
       pattern: "^G[A-Z2-7]{55}$"
@@ -72,11 +131,7 @@ components:
         operationType:
           $ref: "#/components/schemas/SendOperationType"
         spendable:
-          type: string
-          description: >-
-            Source's spendable balance of the asset (XLM: balance minus
-            minimum reserve, selling liabilities and one base fee). Omitted
-            when the source account does not exist.
+          $ref: "#/components/schemas/Amount"
     ResolvedAddress:
       type: object
       required: [type, accountId]
@@ -158,6 +213,8 @@ components:
   responses:
     ValidationError:
       description: Input failed validation
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -166,12 +223,15 @@ components:
               $ref: "./openapi-errors.yaml#/components/examples/BadRequest400"
     Unauthorized:
       description: Missing or invalid bearer token
+      headers:
+        X-Request-Id: { $ref: "#/components/headers/X-Request-Id" }
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
           example:
             code: AUTH_HEADER_INVALID
             error: Missing or malformed Authorization header
+            requestId: "3f1c9a2e-7b4d-4c8a-9e6f-1a2b3c4d5e6f"
 
 paths:
   /api/v1/network/fees:
@@ -277,6 +337,8 @@ paths:
         above the spendable balance. A well-formed request always returns
         200; problems come back as warnings.
       security: [{ bearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/RequestId"
       requestBody:
         required: true
         content:
