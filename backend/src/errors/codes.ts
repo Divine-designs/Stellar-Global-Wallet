@@ -27,6 +27,8 @@ export const ERROR_CODES = [
   "INVALID_TRANSACTION",
   "INSUFFICIENT_FEE",
   "TIMEOUT",
+  "TX_EXPIRED",
+  "TX_ALREADY_SUBMITTED",
 
   // Horizon result codes (mapped to a fixed set)
   "HORIZON_ERROR",

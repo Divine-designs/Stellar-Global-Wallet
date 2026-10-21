@@ -257,6 +257,8 @@ export function createApp(
   // `express.json` for every other route is then a no-op for these paths.
   app.use("/api/v1/wallet/fee-bump", express.json({ limit: "64kb" }));
   app.use("/api/v1/wallet/submit-multisig", express.json({ limit: "64kb" }));
+  // A client-signed envelope (plain or fee-bump) posted to /submit.
+  app.use("/api/v1/wallet/submit", express.json({ limit: "64kb" }));
   // #74 — pending multisig store: create/add-signature/submit all carry an
   // XDR envelope (plus a signature), so they need the larger limit too.
   app.use("/api/v1/wallet/pending-multisig", express.json({ limit: "64kb" }));

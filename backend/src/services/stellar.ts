@@ -9,8 +9,17 @@ import {
   NonRetryableHorizonError,
   SequenceConflictError,
   SourceAccountNotFoundError,
+  TransactionAlreadySubmittedError,
+  TransactionExpiredError,
 } from "./stellarErrors";
-import { baseAccountId, describeUnsignedTransaction, UnsignedTransactionInfo } from "./transactionEnvelope";
+import {
+  assertNotExpired,
+  baseAccountId,
+  describeUnsignedTransaction,
+  ParsedSignedTransaction,
+  parseSignedTransaction,
+  UnsignedTransactionInfo,
+} from "./transactionEnvelope";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
 import { fromStroops, toStroops } from "../utils/stroops";
 
@@ -58,6 +67,19 @@ const BASE_RESERVE = "0.5";
 
 /** Which operation the send/build path chose for a destination (#65). */
 export type SendOperationType = "payment" | "createAccount";
+
+/** Result of submitting a client-signed envelope that Horizon accepted. */
+export interface SubmitSignedResult {
+  hash: string;
+  ledger: number;
+  successful: boolean;
+}
+
+/** Horizon timed out (504): the transaction may still land, so the client should poll for `hash`. */
+export interface SubmitSignedPending {
+  hash: string;
+  status: "pending";
+}
 
 /** One pre-signing warning returned by `precheckSend` (#64). */
 export interface SendPrecheckWarning {
@@ -644,6 +666,61 @@ export class StellarService {
       ...describeUnsignedTransaction(builder.build(), this.networkPassphrase),
       operationType: resolved.operationType,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Issue #2 – Submit a client-signed envelope
+  // ---------------------------------------------------------------------------
+  // The client signed a specific sequence number, so unlike `sendPayment` this
+  // never re-signs or retries with a fresh sequence: a failure is reported and
+  // the client rebuilds. Plain and fee-bump envelopes are both accepted.
+  // ---------------------------------------------------------------------------
+
+  /** Parses and sanity-checks a signed envelope (see `parseSignedTransaction`) against this network. */
+  parseSignedTransaction(signedXdr: string): ParsedSignedTransaction {
+    return parseSignedTransaction(signedXdr, this.networkPassphrase);
+  }
+
+  async submitSigned(params: { signedXdr: string }): Promise<SubmitSignedResult | SubmitSignedPending> {
+    const parsed = this.parseSignedTransaction(params.signedXdr);
+    assertNotExpired(parsed.transaction);
+
+    try {
+      const response = await this.server.submitTransaction(parsed.transaction);
+      return { hash: response.hash, ledger: response.ledger, successful: response.successful };
+    } catch (err) {
+      // A gateway timeout says nothing about whether the transaction landed.
+      if (hasResponseStatus(err, 504)) return { hash: parsed.hash, status: "pending" };
+      throw await this.translateSignedSubmissionError(err, parsed);
+    }
+  }
+
+  private async translateSignedSubmissionError(err: unknown, parsed: ParsedSignedTransaction): Promise<unknown> {
+    const txCode = (
+      (err as { response?: { extras?: { result_codes?: { transaction?: string } } } } | undefined)?.response
+        ?.extras?.result_codes
+    )?.transaction;
+
+    if (err instanceof StellarSdk.BadResponseError) {
+      if (txCode === "tx_too_late") {
+        return new TransactionExpiredError("The transaction expired before it reached the network. Build a new one and sign it again.");
+      }
+      // Re-sending an envelope that already landed fails with tx_bad_seq; if
+      // the hash is on the ledger it's a duplicate, not a stale sequence.
+      if (txCode === "tx_bad_seq" && (await this.transactionExists(parsed.hash))) {
+        return new TransactionAlreadySubmittedError(parsed.hash);
+      }
+    }
+    return translateSubmissionError(err, parsed.sourcePublicKey);
+  }
+
+  private async transactionExists(hash: string): Promise<boolean> {
+    try {
+      await this.server.transactions().transaction(hash).call();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Loads the source account for a build, or throws SOURCE_ACCOUNT_NOT_FOUND if it isn't funded. */

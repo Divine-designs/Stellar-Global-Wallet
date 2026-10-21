@@ -84,6 +84,49 @@ export class SourceAccountNotFoundError extends NotFoundError {
 }
 
 /**
+ * The submitted envelope can't be sent as-is: unparseable XDR, no
+ * signatures, or signatures that don't verify under this network's
+ * passphrase (it was signed for a different network).
+ */
+export class InvalidTransactionError extends AppError {
+  constructor(message: string, reason: "MALFORMED_XDR" | "UNSIGNED" | "WRONG_NETWORK") {
+    super(message, {
+      code: "INVALID_TRANSACTION",
+      details: { reason },
+      retryable: false,
+      status: 400,
+    });
+  }
+}
+
+/**
+ * `timeBounds.maxTime` has passed (or Horizon answered `tx_too_late`). The
+ * signed XDR is dead; the client must rebuild and sign again.
+ */
+export class TransactionExpiredError extends AppError {
+  constructor(message: string, expiredAt?: string) {
+    super(message, {
+      code: "TX_EXPIRED",
+      details: expiredAt ? { expiredAt } : undefined,
+      retryable: true,
+      status: 400,
+    });
+  }
+}
+
+/** The same signed envelope was already applied to the ledger. */
+export class TransactionAlreadySubmittedError extends AppError {
+  constructor(readonly hash: string) {
+    super(`Transaction ${hash} was already submitted.`, {
+      code: "TX_ALREADY_SUBMITTED",
+      details: { hash },
+      retryable: false,
+      status: 409,
+    });
+  }
+}
+
+/**
  * #21 — user-facing copy for the Horizon result codes this service maps into
  * `HORIZON_REJECTED` / `SEQUENCE_CONFLICT` errors. Kept next to the error
  * classes so the catalogue in `docs/error-codes.md` stays in sync with the
