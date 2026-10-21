@@ -72,6 +72,12 @@ These endpoints only build transactions. The client must show the reserve
 change (an unsponsored trustline addition locks 0.5 XLM), obtain the user's
 signature through their wallet, and use a supported submission flow.
 
+Failures use the shared error envelope and stable `error.code` values:
+`INSUFFICIENT_RESERVE` and `ASSET_ISSUER_NOT_FOUND` for trustline additions,
+`TRUSTLINE_NOT_FOUND` and `TRUSTLINE_HAS_BALANCE` for trustline removal,
+`ASSET_ALREADY_ADDED` for duplicate wallet assets, and
+`ASSET_HAS_ACTIVE_SPEND_LIMIT` when a wallet asset still has a spend limit.
+
 ## Legacy secret-key route migration
 
 The legacy routes below emit `Deprecation`, `Sunset`, and `Link` headers and
