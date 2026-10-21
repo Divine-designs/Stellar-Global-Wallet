@@ -1,9 +1,18 @@
 import { Router } from "express";
 import { body, param } from "express-validator";
-import { assertValidRequest } from "../middleware/requestValidation";
+import { assertValidRequest, rejectUnknownBodyFields } from "../middleware/requestValidation";
 import { GlobeWalletContract } from "../services/contracts/globeWallet";
 import { jwtAuth } from "../middleware/jwtAuth";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
+import { isValidAccountId } from "../validation/historyQuery";
+
+/** Largest value a Soroban i128 can hold. */
+const I128_MAX = 2n ** 127n - 1n;
+
+/** Positive integer stroop amount that fits an i128 — checked as BigInt so it never loses precision. */
+function isValidSpendAmount(value: unknown): boolean {
+  return typeof value === "string" && /^[1-9]\d*$/.test(value) && BigInt(value) <= I128_MAX;
+}
 
 export function createContractRouter(globeWallet: GlobeWalletContract): Router {
   const contractRouter = Router();
@@ -181,6 +190,48 @@ export function createContractRouter(globeWallet: GlobeWalletContract): Router {
         const { userSecretKey, assetCode, amount } = req.body;
         const result = await globeWallet.recordSpend({ userSecretKey, assetCode, amount });
         res.json({ hash: result.hash, ledger: result.ledger, successful: true });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #4 — non-custodial record_spend: simulates the call and returns the
+  // assembled XDR (footprint, resource fee, auth entries) for the user to
+  // sign, instead of taking `userSecretKey` like POST /wallet/spend.
+  contractRouter.post(
+    "/wallet/spend/build",
+    rejectUnknownBodyFields(["userPublicKey", "assetCode", "amount"]),
+    body("userPublicKey").custom(isValidAccountId).withMessage(publicKeyMessage),
+    body("assetCode")
+      .isString()
+      .matches(/^[A-Za-z0-9]{1,12}$/)
+      .withMessage("must be a 1-12 character alphanumeric asset code"),
+    body("amount")
+      .custom(isValidSpendAmount)
+      .withMessage("amount must be a positive integer string in the asset's smallest unit (stroops)"),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { userPublicKey, assetCode, amount } = req.body;
+        res.json(await globeWallet.buildRecordSpend({ userPublicKey, assetCode, amount }));
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #4 — submit the signed XDR from any contract build route and wait for the
+  // final status. 202 with the hash if the network hasn't decided in time.
+  contractRouter.post(
+    "/wallet/submit",
+    rejectUnknownBodyFields(["signedXdr"]),
+    body("signedXdr").isString().isLength({ min: 1, max: 64 * 1024 }),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const result = await globeWallet.submitSigned(req.body.signedXdr);
+        res.status("status" in result ? 202 : 200).json(result);
       } catch (err) {
         next(err);
       }

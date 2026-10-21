@@ -52,6 +52,8 @@ export const ERROR_CODES = [
   "CONTRACT_ERROR",
   "CONTRACT_NOT_FOUND",
   "CONTRACT_INVOCATION_FAILED",
+  "SOROBAN_UNAVAILABLE",
+  "SOROBAN_REBUILD_REQUIRED",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];

@@ -1,8 +1,14 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../../config";
-import { SorobanService, ContractCallResult } from "../soroban";
-import { SorobanNotConfiguredError, SorobanSimulationError, SorobanTransactionError } from "../sorobanErrors";
-import { describeGlobeWalletError } from "./globeWalletErrors";
+import { SorobanService, ContractCallResult, PreparedInvocation } from "../soroban";
+import {
+  SorobanContractError,
+  SorobanNotConfiguredError,
+  SorobanSimulationError,
+  SorobanTransactionError,
+} from "../sorobanErrors";
+import type { SubmitSignedPending, SubmitSignedResult } from "../transactionEnvelope";
+import { describeGlobeWalletError, extractContractErrorCode, getGlobeWalletApiCode } from "./globeWalletErrors";
 import type {
   AssetInfo,
   AllowedTokenInfo,
@@ -113,6 +119,26 @@ function withWalletErrorTranslation<T>(promise: Promise<T>): Promise<T> {
     }
     if (err instanceof SorobanTransactionError) {
       throw new SorobanTransactionError(describeGlobeWalletError(err.message), err.hash);
+    }
+    throw err;
+  });
+}
+
+/**
+ * Re-throws a simulation failure caused by a known `WalletError` as a
+ * {@link SorobanContractError} carrying the stable API code (e.g.
+ * SPEND_LIMIT_EXCEEDED), so clients can branch on `error.code`. Anything else
+ * passes through untouched.
+ */
+function withContractErrorCodes<T>(promise: Promise<T>): Promise<T> {
+  return promise.catch((err: unknown) => {
+    if (err instanceof SorobanSimulationError) {
+      const raw = err.raw ?? err.message;
+      const contractErrorCode = extractContractErrorCode(raw);
+      const apiCode = getGlobeWalletApiCode(raw);
+      if (contractErrorCode !== null && apiCode) {
+        throw new SorobanContractError(describeGlobeWalletError(raw), apiCode, contractErrorCode, err.raw);
+      }
     }
     throw err;
   });
@@ -267,6 +293,43 @@ export class GlobeWalletContract {
         ],
       })
     );
+  }
+
+  /**
+   * Non-custodial {@link recordSpend}: simulates `record_spend` and returns
+   * the assembled transaction unsigned for `userPublicKey` to sign (the
+   * contract calls `user.require_auth()` for this exact account). A spend that
+   * would break the daily limit fails here, in simulation, with the mapped
+   * contract error code — before anyone signs.
+   */
+  async buildRecordSpend(params: {
+    userPublicKey: string;
+    assetCode: string;
+    /** Amount in the asset's smallest unit (stroops), as an integer string. */
+    amount: string;
+  }): Promise<PreparedInvocation> {
+    const contractId = requireContractId();
+    const { userPublicKey, assetCode, amount } = params;
+    return withWalletErrorTranslation(
+      withContractErrorCodes(
+        this.soroban.prepareInvocation({
+          contractId,
+          method: "record_spend",
+          sourcePublicKey: userPublicKey,
+          args: [
+            StellarSdk.nativeToScVal(userPublicKey, { type: "address" }),
+            StellarSdk.nativeToScVal(assetCode, { type: "string" }),
+            // BigInt, not Number: amounts past 2^53 stroops must survive exactly.
+            StellarSdk.nativeToScVal(BigInt(amount), { type: "i128" }),
+          ],
+        })
+      )
+    );
+  }
+
+  /** Submits a transaction signed by the user (from {@link buildRecordSpend} or any other build) and waits for the result. */
+  async submitSigned(signedXdr: string): Promise<SubmitSignedResult | SubmitSignedPending> {
+    return withWalletErrorTranslation(this.soroban.submitSigned({ signedXdr }));
   }
 
   /**

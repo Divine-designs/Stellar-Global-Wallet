@@ -2,6 +2,13 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { InvalidTransactionError, TransactionExpiredError } from "./stellarErrors";
 
 /**
+ * How long an unsigned transaction stays valid. Long enough for a user to
+ * review it and approve the wallet prompt, short enough that an abandoned
+ * XDR can't be submitted later.
+ */
+export const BUILD_TIMEOUT_SECONDS = 180;
+
+/**
  * What a build endpoint returns for a transaction the client is about to
  * sign: the unsigned envelope plus everything a wallet UI needs to show
  * before asking for a signature (network, fee, expiry).
@@ -45,6 +52,23 @@ export function baseAccountId(address: string): string {
   return address.startsWith("M")
     ? StellarSdk.MuxedAccount.fromAddress(address, "0").baseAccount().accountId()
     : address;
+}
+
+/** A submitted transaction the network accepted. */
+export interface SubmitSignedResult {
+  hash: string;
+  ledger: number;
+  successful: boolean;
+}
+
+/**
+ * The network didn't answer in time (Horizon 504, or Soroban RPC still
+ * reporting NOT_FOUND). The transaction may yet land, so the client should
+ * poll for `hash` rather than rebuild.
+ */
+export interface SubmitSignedPending {
+  hash: string;
+  status: "pending";
 }
 
 export type AnyTransaction = StellarSdk.Transaction | StellarSdk.FeeBumpTransaction;

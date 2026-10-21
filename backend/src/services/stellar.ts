@@ -17,9 +17,12 @@ import {
 import {
   assertNotExpired,
   baseAccountId,
+  BUILD_TIMEOUT_SECONDS,
   describeUnsignedTransaction,
   ParsedSignedTransaction,
   parseSignedTransaction,
+  SubmitSignedPending,
+  SubmitSignedResult,
   UnsignedTransactionInfo,
 } from "./transactionEnvelope";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
@@ -84,19 +87,6 @@ export interface PathPaymentBuild extends UnsignedTransactionInfo {
   path: string[];
 }
 
-/** Result of submitting a client-signed envelope that Horizon accepted. */
-export interface SubmitSignedResult {
-  hash: string;
-  ledger: number;
-  successful: boolean;
-}
-
-/** Horizon timed out (504): the transaction may still land, so the client should poll for `hash`. */
-export interface SubmitSignedPending {
-  hash: string;
-  status: "pending";
-}
-
 /** One pre-signing warning returned by `precheckSend` (#64). */
 export interface SendPrecheckWarning {
   code:
@@ -137,13 +127,6 @@ const RETRY_BASE_DELAY_MS = 200;
 
 /** Path payment result codes that mean "the quote no longer holds" rather than a deterministic failure. */
 const PATH_EXPIRED_OPERATION_CODES = ["op_too_few_offers", "op_under_dest_min", "op_over_source_max"];
-
-/**
- * How long an unsigned transaction stays valid. Long enough for a user to
- * review it and approve the wallet prompt, short enough that an abandoned
- * XDR can't be submitted later.
- */
-const BUILD_TIMEOUT_SECONDS = 180;
 
 export class StellarService {
   private server: StellarSdk.Horizon.Server;

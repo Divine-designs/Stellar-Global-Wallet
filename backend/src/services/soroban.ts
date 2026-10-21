@@ -1,7 +1,22 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../config";
-import { SorobanSimulationError, SorobanTransactionError } from "./sorobanErrors";
+import {
+  SorobanRebuildRequiredError,
+  SorobanSimulationError,
+  SorobanTransactionError,
+  SorobanUnavailableError,
+} from "./sorobanErrors";
 import { getCachedSimulate, setCachedSimulate } from "./sorobanCache";
+import { SourceAccountNotFoundError, TransactionExpiredError } from "./stellarErrors";
+import {
+  assertNotExpired,
+  BUILD_TIMEOUT_SECONDS,
+  describeUnsignedTransaction,
+  parseSignedTransaction,
+  SubmitSignedPending,
+  SubmitSignedResult,
+  UnsignedTransactionInfo,
+} from "./transactionEnvelope";
 
 const { rpc } = StellarSdk;
 
@@ -15,6 +30,20 @@ export interface ContractCallResult<T = unknown> {
   result: T;
   hash: string;
   ledger: number;
+}
+
+/** A simulated and assembled invocation, ready for the user to sign. */
+export interface PreparedInvocation extends UnsignedTransactionInfo {
+  /** Soroban resource fee (stroops) added to the inclusion fee by simulation. */
+  minResourceFee: string;
+  /**
+   * Authorization entries from simulation, base64 XDR. Entries that use
+   * address credentials must be signed too; source-account entries are
+   * covered by signing the envelope.
+   */
+  authEntries: string[];
+  /** Ledger the simulation ran against. */
+  latestLedger: number;
 }
 
 export class SorobanService {
@@ -142,7 +171,8 @@ export class SorobanService {
     sourceAccount: StellarSdk.Account,
     contractId: string,
     method: string,
-    args: StellarSdk.xdr.ScVal[]
+    args: StellarSdk.xdr.ScVal[],
+    timeoutSeconds = 30
   ) {
     const contract = new StellarSdk.Contract(contractId);
     return new StellarSdk.TransactionBuilder(sourceAccount, {
@@ -150,7 +180,7 @@ export class SorobanService {
       networkPassphrase: this.networkPassphrase,
     })
       .addOperation(contract.call(method, ...args))
-      .setTimeout(30)
+      .setTimeout(timeoutSeconds)
       .build();
   }
 
@@ -172,6 +202,91 @@ export class SorobanService {
       response = await this.server.getTransaction(hash);
     }
     return response;
+  }
+
+  /**
+   * Non-custodial counterpart to {@link invoke}: simulates the call and
+   * returns the assembled (footprint + resource fee) transaction *unsigned*,
+   * for the user's wallet to sign. Unlike {@link buildUnsignedTransaction}
+   * the source account must exist (its sequence number is used) and a failed
+   * simulation is an error, never a silent fallback to an unprepared XDR.
+   */
+  async prepareInvocation(params: {
+    contractId: string;
+    method: string;
+    args: StellarSdk.xdr.ScVal[];
+    sourcePublicKey: string;
+  }): Promise<PreparedInvocation> {
+    const { contractId, method, args, sourcePublicKey } = params;
+
+    let sourceAccount: StellarSdk.Account;
+    try {
+      sourceAccount = await this.server.getAccount(sourcePublicKey);
+    } catch (err) {
+      if (err instanceof Error && /account not found/i.test(err.message)) {
+        throw new SourceAccountNotFoundError(sourcePublicKey);
+      }
+      throw new SorobanUnavailableError();
+    }
+
+    const tx = this.buildInvocation(sourceAccount, contractId, method, args, BUILD_TIMEOUT_SECONDS);
+    let sim: StellarSdk.rpc.Api.SimulateTransactionResponse;
+    try {
+      sim = await this.server.simulateTransaction(tx);
+    } catch {
+      throw new SorobanUnavailableError();
+    }
+    if (rpc.Api.isSimulationError(sim)) {
+      throw new SorobanSimulationError(
+        `Simulation failed for ${contractId}.${method}: ${sim.error}`,
+        sim.error
+      );
+    }
+
+    const prepared = rpc.assembleTransaction(tx, sim).build();
+    return {
+      ...describeUnsignedTransaction(prepared, this.networkPassphrase),
+      minResourceFee: sim.minResourceFee,
+      authEntries: (sim.result?.auth ?? []).map((entry) => entry.toXDR("base64")),
+      latestLedger: sim.latestLedger,
+    };
+  }
+
+  /**
+   * Submits a client-signed Soroban transaction and polls until the network
+   * reports a final status. Never re-simulates or re-signs: the user signed a
+   * specific footprint, so anything that invalidates it (moved ledger, stale
+   * sequence, expiry) is reported for the client to rebuild. If the network
+   * hasn't decided within the polling window the hash comes back as pending.
+   */
+  async submitSigned(params: { signedXdr: string }): Promise<SubmitSignedResult | SubmitSignedPending> {
+    const parsed = parseSignedTransaction(params.signedXdr, this.networkPassphrase);
+    assertNotExpired(parsed.transaction);
+
+    let send: StellarSdk.rpc.Api.SendTransactionResponse;
+    try {
+      send = await this.server.sendTransaction(parsed.transaction);
+    } catch {
+      throw new SorobanUnavailableError();
+    }
+
+    if (send.status === "ERROR") throw translateSendError(send, parsed.hash);
+    if (send.status === "TRY_AGAIN_LATER") {
+      throw new SorobanUnavailableError("Soroban RPC is busy. Try again shortly.");
+    }
+
+    // PENDING, or DUPLICATE (already queued by an earlier submit): wait for the outcome.
+    const final = await this.pollTransaction(send.hash);
+    if (final.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return { hash: send.hash, ledger: final.ledger, successful: true };
+    }
+    if (final.status === rpc.Api.GetTransactionStatus.FAILED) {
+      throw new SorobanTransactionError(
+        `Transaction failed on-chain after passing simulation (hash ${send.hash})`,
+        send.hash
+      );
+    }
+    return { hash: send.hash, status: "pending" };
   }
 
   /**
@@ -213,4 +328,24 @@ export class SorobanService {
     const latest = await this.server.getLatestLedger();
     return latest.sequence;
   }
+}
+
+/** Result codes that mean the signed transaction is stale and the client must rebuild it. */
+const REBUILD_RESULT_CODES = ["txSorobanInvalid", "txBadSeq", "txInsufficientFee"];
+
+function translateSendError(send: StellarSdk.rpc.Api.SendTransactionResponse, hash: string): Error {
+  const resultCode = send.errorResult?.result().switch().name ?? "unknown";
+  if (resultCode === "txTooLate") {
+    return new TransactionExpiredError("The transaction expired before it reached the network. Build a new one and sign it again.");
+  }
+  if (REBUILD_RESULT_CODES.includes(resultCode)) {
+    return new SorobanRebuildRequiredError(
+      `The prepared transaction is no longer valid (${resultCode}). Build it again and sign the new one.`,
+      resultCode
+    );
+  }
+  return new SorobanSimulationError(
+    `Transaction ${hash} was rejected before entering the ledger (${resultCode})`,
+    send.errorResult ? send.errorResult.toXDR("base64") : resultCode
+  );
 }
