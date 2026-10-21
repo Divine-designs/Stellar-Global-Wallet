@@ -1,4 +1,4 @@
-import { AppError, HorizonError } from "../errors/appError";
+import { AppError, HorizonError, NotFoundError } from "../errors/appError";
 
 export class SequenceConflictError extends HorizonError {
   constructor(message: string, readonly horizonResultCodes?: unknown) {
@@ -64,6 +64,22 @@ export class DestinationNotFundedError extends AppError {
       retryable: false,
       status: 400,
     });
+  }
+}
+
+/**
+ * The unsigned-XDR build endpoints need the source account's current
+ * sequence number, so an account that doesn't exist yet can't be built for.
+ * Distinct from the generic ACCOUNT_NOT_FOUND so the client can tell "fund
+ * your wallet first" apart from "that recipient doesn't exist".
+ */
+export class SourceAccountNotFoundError extends NotFoundError {
+  constructor(sourcePublicKey: string) {
+    super(
+      `Source account ${sourcePublicKey} does not exist on the network. Fund it before building a transaction.`,
+      "SOURCE_ACCOUNT_NOT_FOUND",
+      { source: sourcePublicKey }
+    );
   }
 }
 

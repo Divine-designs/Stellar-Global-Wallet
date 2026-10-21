@@ -8,7 +8,9 @@ import {
   MemoRequiredError,
   NonRetryableHorizonError,
   SequenceConflictError,
+  SourceAccountNotFoundError,
 } from "./stellarErrors";
+import { baseAccountId, describeUnsignedTransaction, UnsignedTransactionInfo } from "./transactionEnvelope";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
 import { fromStroops, toStroops } from "../utils/stroops";
 
@@ -94,6 +96,13 @@ const MAX_SEQ_RETRIES = 3;
 
 /** How many ms to pause between retries (exponential back-off seed). */
 const RETRY_BASE_DELAY_MS = 200;
+
+/**
+ * How long an unsigned transaction stays valid. Long enough for a user to
+ * review it and approve the wallet prompt, short enough that an abandoned
+ * XDR can't be submitted later.
+ */
+const BUILD_TIMEOUT_SECONDS = 180;
 
 export class StellarService {
   private server: StellarSdk.Horizon.Server;
@@ -491,13 +500,11 @@ export class StellarService {
     // building the transaction. This prevents accidental fund loss when
     // sending to custodial/exchange accounts that rely on the memo to
     // credit the deposit.
-    const requiresMemo = await this.destinationRequiresMemo(destinationPublicKey);
-    if (requiresMemo && !memo) {
-      throw new MemoRequiredError(
-        `The destination account ${destinationPublicKey} requires a memo for transactions. ` +
-          "Please provide a memo to avoid losing funds. (SEP-29)"
-      );
-    }
+    assertMemoProvided(
+      destinationPublicKey,
+      await this.destinationRequiresMemo(destinationPublicKey),
+      memo
+    );
 
     // #65 — an unfunded destination needs createAccount, not payment.
     const { operation } = await this.resolveSendOperation(destinationPublicKey, asset, amount);
@@ -588,6 +595,71 @@ export class StellarService {
         startingBalance: amount,
       }),
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  //  Issue #1 – Unsigned payment XDR for client-side signing
+  // ---------------------------------------------------------------------------
+  // Non-custodial counterpart to `sendPayment`: runs the same destination
+  // checks (SEP-29 memo, createAccount for unfunded destinations) but only
+  // returns the unsigned envelope. Nothing is submitted, so no lock is taken
+  // and no sequence number is reserved — two builds in a row return the same
+  // sequence; whichever is signed and submitted first wins.
+  // ---------------------------------------------------------------------------
+
+  async buildPayment(params: {
+    sourcePublicKey: string;
+    destinationPublicKey: string;
+    amount: string;
+    asset?: string;
+    memo?: string;
+  }): Promise<UnsignedTransactionInfo & { operationType: SendOperationType }> {
+    const { sourcePublicKey, destinationPublicKey, amount, asset, memo } = params;
+    const sourceAccount = await this.loadSourceAccount(sourcePublicKey);
+
+    // Lookups run against the underlying G... account when the destination
+    // is muxed; only the payment operation carries the M... address.
+    const baseDestination = baseAccountId(destinationPublicKey);
+    assertMemoProvided(baseDestination, await this.destinationRequiresMemo(baseDestination), memo);
+
+    const resolved = await this.resolveSendOperation(baseDestination, asset, amount);
+    const operation =
+      resolved.operationType === "payment" && baseDestination !== destinationPublicKey
+        ? StellarSdk.Operation.payment({
+            destination: destinationPublicKey,
+            asset: parseAsset(asset),
+            amount,
+          })
+        : resolved.operation;
+
+    const builder = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: await this.currentBaseFee(),
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(BUILD_TIMEOUT_SECONDS);
+    if (memo) builder.addMemo(StellarSdk.Memo.text(memo));
+
+    return {
+      ...describeUnsignedTransaction(builder.build(), this.networkPassphrase),
+      operationType: resolved.operationType,
+    };
+  }
+
+  /** Loads the source account for a build, or throws SOURCE_ACCOUNT_NOT_FOUND if it isn't funded. */
+  private async loadSourceAccount(sourcePublicKey: string): Promise<StellarSdk.Account> {
+    const account = await this.loadAccountOrNull(sourcePublicKey);
+    if (!account) throw new SourceAccountNotFoundError(sourcePublicKey);
+    return new StellarSdk.Account(account.accountId(), account.sequenceNumber());
+  }
+
+  /** Current per-operation fee from Horizon, falling back to the protocol minimum if unreachable. */
+  private async currentBaseFee(): Promise<string> {
+    try {
+      return String(await this.server.fetchBaseFee());
+    } catch {
+      return StellarSdk.BASE_FEE;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1067,9 +1139,19 @@ export class StellarService {
 // ---------------------------------------------------------------------------
 
 function parseAsset(assetStr: string | undefined): StellarSdk.Asset {
-  if (!assetStr || assetStr === "XLM") return StellarSdk.Asset.native();
+  if (!assetStr || assetStr === "XLM" || assetStr === "native") return StellarSdk.Asset.native();
   const [code, issuer] = assetStr.split(":");
   return new StellarSdk.Asset(code, issuer);
+}
+
+/** SEP-29: refuse to build or send to a memo-required destination without a memo. */
+function assertMemoProvided(destinationPublicKey: string, requiresMemo: boolean, memo: string | undefined): void {
+  if (requiresMemo && !memo) {
+    throw new MemoRequiredError(
+      `The destination account ${destinationPublicKey} requires a memo for transactions. ` +
+        "Please provide a memo to avoid losing funds. (SEP-29)"
+    );
+  }
 }
 
 /** SEP-29: `config.memo_required` data entry set to "1" (base64 "MQ=="). */

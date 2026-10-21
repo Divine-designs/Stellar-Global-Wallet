@@ -14,6 +14,7 @@ import {
 } from "@globe-wallet/sdk";
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { getCachedResult, cacheResult } from "../services/idempotency";
+import { createClientSigningRouter } from "./clientSigning";
 
 const SEP7_PAY_PREFIX = "web+stellar:pay?";
 
@@ -122,6 +123,10 @@ async function handleIdempotentRequest(
 
 export function createWalletRouter(stellar: StellarService): Router {
   const walletRouter = Router();
+
+  // Build/submit routes for client-side signing. Mounted ahead of the
+  // router-wide jwtAuth below because they gate themselves.
+  walletRouter.use(createClientSigningRouter(stellar));
 
   walletRouter.use(jwtAuth);
 

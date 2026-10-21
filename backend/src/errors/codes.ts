@@ -18,6 +18,7 @@ export const ERROR_CODES = [
   // Accounts
   "ACCOUNT_NOT_FOUND",
   "ACCOUNT_NOT_FUNDED",
+  "SOURCE_ACCOUNT_NOT_FOUND",
   "INSUFFICIENT_BALANCE",
 
   // Transactions
