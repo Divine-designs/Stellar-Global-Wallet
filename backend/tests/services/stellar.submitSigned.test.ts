@@ -2,6 +2,7 @@ import * as StellarSdk from "@stellar/stellar-sdk";
 import { StellarService } from "../../src/services/stellar";
 import {
   InvalidTransactionError,
+  MemoRequiredError,
   NonRetryableHorizonError,
   PathExpiredError,
   SequenceConflictError,
@@ -115,6 +116,17 @@ describe("StellarService.submitSigned (issue #2)", () => {
     const promise = new StellarService().submitSigned({ signedXdr: signedPayment().xdr });
 
     await expect(promise).rejects.toMatchObject({ code: "TX_EXPIRED" });
+  });
+
+  it("maps the SDK's own SEP-29 memo check to MEMO_REQUIRED instead of a 500", async () => {
+    jest
+      .spyOn(Horizon.Server.prototype, "submitTransaction")
+      .mockRejectedValue(new StellarSdk.AccountRequiresMemoError("memo required", "GEXCHANGE", 0));
+
+    const promise = new StellarService().submitSigned({ signedXdr: signedPayment().xdr });
+
+    await expect(promise).rejects.toBeInstanceOf(MemoRequiredError);
+    await expect(promise).rejects.toMatchObject({ code: "MEMO_REQUIRED", status: 400 });
   });
 
   it("returns a pending result with the hash when Horizon times out with a 504", async () => {

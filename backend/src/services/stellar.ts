@@ -703,6 +703,14 @@ export class StellarService {
     )?.response?.extras?.result_codes;
     const txCode = resultCodes?.transaction;
 
+    // The SDK runs its own SEP-29 check before sending; surface it as the same
+    // error /send and the build routes use instead of a 500.
+    if (err instanceof StellarSdk.AccountRequiresMemoError) {
+      return new MemoRequiredError(
+        `The destination account ${err.accountId} requires a memo for transactions. ` +
+          "Build the transaction again with a memo to avoid losing funds. (SEP-29)"
+      );
+    }
     if (err instanceof StellarSdk.BadResponseError) {
       if (resultCodes?.operations?.some((code) => PATH_EXPIRED_OPERATION_CODES.includes(code))) {
         return new PathExpiredError(resultCodes);
