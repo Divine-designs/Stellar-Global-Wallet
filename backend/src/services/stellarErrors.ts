@@ -53,7 +53,7 @@ export class DestinationNotFundedError extends AppError {
   constructor(
     message: string,
     details: {
-      reason: "NON_NATIVE_ASSET" | "BELOW_MINIMUM_STARTING_BALANCE";
+      reason: "NON_NATIVE_ASSET" | "BELOW_MINIMUM_STARTING_BALANCE" | "PATH_PAYMENT_CANNOT_CREATE";
       destination: string;
       minimumStartingBalance: string;
     }
@@ -122,6 +122,41 @@ export class TransactionAlreadySubmittedError extends AppError {
       details: { hash },
       retryable: false,
       status: 409,
+    });
+  }
+}
+
+/**
+ * A path payment's quote is stale: the order books moved, so the route no
+ * longer delivers `destMin` / stays under `sendMax`. The UI should re-quote
+ * via /paths/*, then build again.
+ */
+export class PathExpiredError extends AppError {
+  constructor(readonly horizonResultCodes?: unknown) {
+    super("The quoted path is no longer available at that price. Request a new quote and try again.", {
+      code: "PATH_EXPIRED",
+      details: horizonResultCodes ? { horizonResultCodes } : undefined,
+      retryable: true,
+      status: 409,
+    });
+  }
+}
+
+/** The path payment's destination can't hold the destination asset. */
+export class DestinationTrustlineError extends AppError {
+  constructor(
+    message: string,
+    details: {
+      reason: "NO_TRUSTLINE" | "TRUSTLINE_NOT_AUTHORIZED";
+      destination: string;
+      asset: string;
+    }
+  ) {
+    super(message, {
+      code: "DESTINATION_NO_TRUSTLINE",
+      details,
+      retryable: false,
+      status: 400,
     });
   }
 }

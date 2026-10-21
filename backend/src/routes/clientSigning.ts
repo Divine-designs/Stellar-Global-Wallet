@@ -12,6 +12,8 @@ import {
   isValidDestination,
 } from "../validation/buildRequest";
 import { isValidAccountId } from "../validation/historyQuery";
+import { isValidSlippageBps, MAX_SLIPPAGE_BPS } from "../utils/slippage";
+import { validatePathAssets } from "../validation/stellarAsset";
 import { amountMessage, isValidMemoText, isValidStellarAmount, memoTextMessage } from "@globe-wallet/sdk";
 
 /** A signed envelope is a few KB; this leaves room for multi-signature and fee-bump wrappers. */
@@ -46,6 +48,73 @@ export function createClientSigningRouter(stellar: StellarService): Router {
         assertValidRequest(req);
         const { sourcePublicKey, destinationPublicKey, amount, asset, memo } = req.body;
         res.json(await stellar.buildPayment({ sourcePublicKey, destinationPublicKey, amount, asset, memo }));
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #3 — path payments (swaps / cross-asset sends). The client passes back
+  // the route and quoted amount it picked from /paths/*; destMin / sendMax
+  // are derived here from `slippageBps` (default 50, max 500).
+  const pathPaymentFields = [
+    "sourcePublicKey",
+    "destinationPublicKey",
+    "sendAsset",
+    "destAsset",
+    "path",
+    "slippageBps",
+    "memo",
+  ];
+  const pathPaymentValidation = [
+    body("sourcePublicKey").custom(isValidAccountId).withMessage(publicKeyMessage),
+    body("destinationPublicKey").custom(isValidDestination).withMessage(destinationOrMuxedMessage),
+    body("sendAsset").optional().custom(isValidAssetParam).withMessage(assetParamMessage),
+    body("destAsset").custom(isValidAssetParam).withMessage(assetParamMessage),
+    // The thrown message ("Path must contain at most 5 assets", ...) becomes the validation message.
+    body("path")
+      .optional()
+      .custom((path: unknown) => {
+        validatePathAssets(path);
+        return true;
+      }),
+    body("slippageBps")
+      .optional()
+      .custom(isValidSlippageBps)
+      .withMessage(`slippageBps must be an integer between 0 and ${MAX_SLIPPAGE_BPS}`),
+    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
+  ];
+
+  router.post(
+    "/path-payment-strict-send/build",
+    jwtAuth,
+    rejectUnknownBodyFields([...pathPaymentFields, "sendAmount", "quotedDestAmount"]),
+    ...pathPaymentValidation,
+    body("sendAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("quotedDestAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { sendAmount, quotedDestAmount, ...rest } = req.body;
+        res.json(await stellar.buildPathPaymentStrictSend({ ...rest, sendAmount, quotedDestAmount }));
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  router.post(
+    "/path-payment-strict-receive/build",
+    jwtAuth,
+    rejectUnknownBodyFields([...pathPaymentFields, "destAmount", "quotedSendAmount"]),
+    ...pathPaymentValidation,
+    body("destAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("quotedSendAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const { destAmount, quotedSendAmount, ...rest } = req.body;
+        res.json(await stellar.buildPathPaymentStrictReceive({ ...rest, destAmount, quotedSendAmount }));
       } catch (err) {
         next(err);
       }

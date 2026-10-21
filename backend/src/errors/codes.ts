@@ -29,6 +29,8 @@ export const ERROR_CODES = [
   "TIMEOUT",
   "TX_EXPIRED",
   "TX_ALREADY_SUBMITTED",
+  "PATH_EXPIRED",
+  "DESTINATION_NO_TRUSTLINE",
 
   // Horizon result codes (mapped to a fixed set)
   "HORIZON_ERROR",

@@ -3,6 +3,7 @@ import { StellarService } from "../../src/services/stellar";
 import {
   InvalidTransactionError,
   NonRetryableHorizonError,
+  PathExpiredError,
   SequenceConflictError,
   TransactionAlreadySubmittedError,
   TransactionExpiredError,
@@ -149,6 +150,20 @@ describe("StellarService.submitSigned (issue #2)", () => {
     await expect(promise).rejects.toBeInstanceOf(SequenceConflictError);
     expect(submit).toHaveBeenCalledTimes(1);
   });
+
+  it.each(["op_too_few_offers", "op_under_dest_min", "op_over_source_max"])(
+    "maps a path payment rejection with %s to PATH_EXPIRED so the UI can re-quote",
+    async (operationCode) => {
+      jest
+        .spyOn(Horizon.Server.prototype, "submitTransaction")
+        .mockRejectedValue(horizonRejection({ transaction: "tx_failed", operations: [operationCode] }));
+
+      const promise = new StellarService().submitSigned({ signedXdr: signedPayment().xdr });
+
+      await expect(promise).rejects.toBeInstanceOf(PathExpiredError);
+      await expect(promise).rejects.toMatchObject({ code: "PATH_EXPIRED", status: 409, retryable: true });
+    }
+  );
 
   it("passes other Horizon result codes through the existing HORIZON_REJECTED mapping", async () => {
     jest
