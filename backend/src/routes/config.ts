@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { config } from "../config";
+import { API_VERSION, config } from "../config";
 import { GlobeWalletContract } from "../services/contracts/globeWallet";
 import { AppError } from "../errors/appError";
 
@@ -28,8 +28,10 @@ export function createConfigRouter(globeWallet?: GlobeWalletContract): Router {
         }
       }
 
+      res.setHeader("Cache-Control", "public, max-age=60");
       res.json({
         network: config.STELLAR_NETWORK,
+        networkPassphrase: config.NETWORK_PASSPHRASE,
         horizonUrl: config.HORIZON_URL,
         sorobanRpcUrl: config.SOROBAN_RPC_URL,
         contracts: {
@@ -37,7 +39,11 @@ export function createConfigRouter(globeWallet?: GlobeWalletContract): Router {
             contractId: config.GLOBE_WALLET_CONTRACT_ID || null,
             pendingUpgrade,
           },
+          tokenWrapper: config.TOKEN_WRAPPER_CONTRACT_ID || null,
         },
+        features: { contract: Boolean(config.GLOBE_WALLET_CONTRACT_ID) },
+        apiVersion: API_VERSION,
+        minClientVersion: config.MIN_CLIENT_VERSION,
       });
     } catch (err) {
       next(err);
@@ -50,9 +56,8 @@ export function createConfigRouter(globeWallet?: GlobeWalletContract): Router {
         const account = req.body?.account;
         if (typeof account !== "string" || !STELLAR_ACCOUNT_REGEX.test(account)) {
           throw new AppError(
-            "INVALID_ACCOUNT",
-            400,
             "A valid Stellar account address is required",
+            { code: "VALIDATION_ERROR", status: 400 },
           );
         }
 
@@ -72,9 +77,8 @@ export function createConfigRouter(globeWallet?: GlobeWalletContract): Router {
         }
 
         throw new AppError(
-          "FRIENDBOT_FAILED",
-          502,
           "Friendbot could not fund the account",
+          { code: "HORIZON_ERROR", status: 502 },
         );
       } catch (err) {
         next(err);

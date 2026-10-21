@@ -94,6 +94,14 @@ const envSchema = z.object({
       "must be a valid Soroban contract StrKey (C followed by 55 uppercase alphanumeric characters)"
     )
     .optional(),
+  TOKEN_WRAPPER_CONTRACT_ID: z
+    .string()
+    .regex(
+      /^C[A-Z0-9]{55}$/,
+      "must be a valid Soroban contract StrKey (C followed by 55 uppercase alphanumeric characters)"
+    )
+    .optional(),
+  MIN_CLIENT_VERSION: z.string().min(1).default("0.1.0"),
 
   // Number of trusted reverse-proxy hops in front of this service, passed
   // straight to Express's `trust proxy` setting (see src/app.ts). This

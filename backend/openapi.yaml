@@ -315,14 +315,221 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  network:
-                    type: string
-                    enum: [testnet, mainnet, futurenet]
-                  horizonUrl:
-                    type: string
-                    format: uri
+                $ref: '#/components/schemas/ClientConfig'
+          headers:
+            Cache-Control:
+              description: Configuration is cached for 60 seconds.
+              schema:
+                type: string
+                example: public, max-age=60
+  /wallet/trustline/build:
+    post:
+      tags: [wallet]
+      summary: Build an unsigned trustline change
+      operationId: buildTrustline
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TrustlineBuildRequest'
+      responses:
+        '200':
+          description: Unsigned changeTrust transaction and reserve impact
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrustlineBuildResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Trustline or issuer account not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '409':
+          description: Trustline has a non-zero balance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+        '422':
+          description: Account cannot cover the additional trustline reserve
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /contract/wallet/assets/build:
+    post:
+      tags: [contract]
+      summary: Build unsigned XDR to add a wallet asset
+      operationId: buildAddWalletAsset
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [user, asset]
+              properties:
+                user:
+                  $ref: '#/components/schemas/StellarAddress'
+                asset:
+                  $ref: '#/components/schemas/AssetInfo'
+      responses:
+        '200':
+          description: Unsigned Soroban transaction XDR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnsignedXdr'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Asset is already registered on this wallet
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /contract/wallet/assets/remove/build:
+    post:
+      tags: [contract]
+      summary: Build unsigned XDR to remove a wallet asset
+      operationId: buildRemoveWalletAsset
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [user, assetCode]
+              properties:
+                user:
+                  $ref: '#/components/schemas/StellarAddress'
+                assetCode:
+                  type: string
+                  pattern: '^[A-Za-z0-9]{1,12}$'
+      responses:
+        '200':
+          description: Unsigned Soroban transaction XDR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnsignedXdr'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: Asset has an active spend limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorEnvelope'
+  /wallet/send:
+    post:
+      tags: [wallet]
+      summary: Legacy secret-key payment route
+      description: Deprecated. Stop sending secret keys to the API; use wallet-native signing.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /wallet/fee-bump:
+    post:
+      tags: [wallet]
+      summary: Legacy secret-key fee-bump route
+      description: Deprecated. Stop sending fee-source secret keys to the API; see the client-signing migration guide.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /wallet/path-payment-strict-send:
+    post:
+      tags: [wallet]
+      summary: Legacy secret-key strict-send path payment
+      description: Deprecated. Stop sending source secret keys to the API; see the client-signing migration guide.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /wallet/path-payment-strict-receive:
+    post:
+      tags: [wallet]
+      summary: Legacy secret-key strict-receive path payment
+      description: Deprecated. Stop sending source secret keys to the API; see the client-signing migration guide.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /wallet/partial-transaction:
+    post:
+      tags: [wallet]
+      summary: Legacy secret-key partial-transaction builder
+      description: Deprecated. Stop sending source secret keys to the API; see the client-signing migration guide.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /wallet/keypair:
+    post:
+      tags: [wallet]
+      summary: Legacy server-generated keypair route
+      description: Deprecated. Generate and protect account keys in the user's wallet.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
+  /contract/wallet/spend:
+    post:
+      tags: [contract]
+      summary: Legacy secret-key spend route
+      description: Deprecated. Stop sending user secret keys to the API; see the client-signing migration guide.
+      deprecated: true
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          $ref: '#/components/responses/DeprecatedLegacy'
+        '401':
+          $ref: '#/components/responses/DeprecatedUnauthorized'
   /health:
     get:
       tags: [health]
@@ -416,7 +623,167 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/ErrorEnvelope'
+    DeprecatedLegacy:
+      description: Legacy response. This operation is deprecated and will be sunset on January 1, 2027.
+      headers:
+        Deprecation:
+          schema: { type: string, example: '@1798761600' }
+        Sunset:
+          schema: { type: string, example: 'Fri, 01 Jan 2027 00:00:00 GMT' }
+        Link:
+          schema: { type: string, example: '</docs/client-signing>; rel="deprecation"' }
+    DeprecatedUnauthorized:
+      description: Missing or invalid credentials; deprecation headers are still present.
+      headers:
+        Deprecation:
+          schema: { type: string, example: '@1798761600' }
+        Sunset:
+          schema: { type: string, example: 'Fri, 01 Jan 2027 00:00:00 GMT' }
+        Link:
+          schema: { type: string, example: '</docs/client-signing>; rel="deprecation"' }
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorEnvelope'
   schemas:
+    ClientConfig:
+      type: object
+      required:
+        - network
+        - networkPassphrase
+        - horizonUrl
+        - sorobanRpcUrl
+        - contracts
+        - features
+        - apiVersion
+        - minClientVersion
+      properties:
+        network:
+          type: string
+          enum: [testnet, mainnet]
+        networkPassphrase:
+          type: string
+        horizonUrl:
+          type: string
+          format: uri
+        sorobanRpcUrl:
+          type: string
+          format: uri
+        contracts:
+          type: object
+          required: [globeWallet, tokenWrapper]
+          properties:
+            globeWallet:
+              type: object
+              required: [contractId, pendingUpgrade]
+              properties:
+                contractId:
+                  oneOf:
+                    - $ref: '#/components/schemas/ContractAddress'
+                    - type: 'null'
+                pendingUpgrade:
+                  oneOf:
+                    - type: object
+                      additionalProperties: true
+                    - type: 'null'
+            tokenWrapper:
+              oneOf:
+                - $ref: '#/components/schemas/ContractAddress'
+                - type: 'null'
+        features:
+          type: object
+          required: [contract]
+          properties:
+            contract:
+              type: boolean
+        apiVersion:
+          type: string
+        minClientVersion:
+          type: string
+    AssetInfo:
+      type: object
+      additionalProperties: false
+      required: [code, issuer]
+      properties:
+        code:
+          type: string
+          minLength: 1
+          maxLength: 12
+          pattern: '^[A-Za-z0-9]{1,12}$'
+        issuer:
+          oneOf:
+            - $ref: '#/components/schemas/StellarAddress'
+            - type: 'null'
+          description: Null is valid only for native XLM.
+      oneOf:
+        - properties:
+            code:
+              const: XLM
+            issuer:
+              type: 'null'
+        - properties:
+            code:
+              not:
+                const: XLM
+            issuer:
+              $ref: '#/components/schemas/StellarAddress'
+    TrustlineBuildRequest:
+      type: object
+      additionalProperties: false
+      required: [account, asset]
+      properties:
+        account:
+          $ref: '#/components/schemas/StellarAddress'
+        asset:
+          type: object
+          additionalProperties: false
+          required: [code, issuer]
+          properties:
+            code:
+              type: string
+              minLength: 1
+              maxLength: 12
+              pattern: '^[A-Za-z0-9]{1,12}$'
+              not:
+                const: XLM
+            issuer:
+              $ref: '#/components/schemas/StellarAddress'
+        limit:
+          type: string
+          pattern: '^(?:0|[1-9]\d*)(?:\.\d{1,7})?$'
+          description: Positive decimal trustline limit, or any zero-valued decimal string to remove the trustline.
+    TrustlineBuildResponse:
+      type: object
+      required: [xdr, networkPassphrase, reserveDelta, spendableXlmAfter]
+      properties:
+        xdr:
+          type: string
+        networkPassphrase:
+          type: string
+        reserveDelta:
+          type: string
+          enum: ['0.5', '-0.5', '0']
+          description: Reserve change for this account; sponsored trustline removal may have no effect.
+        spendableXlmAfter:
+          $ref: '#/components/schemas/Amount'
+    UnsignedXdr:
+      type: object
+      required: [xdr]
+      properties:
+        xdr:
+          type: string
+    DeprecationHeaders:
+      type: object
+      properties:
+        Deprecation:
+          type: string
+          example: '@1798761600'
+        Sunset:
+          type: string
+          example: Fri, 01 Jan 2027 00:00:00 GMT
+        Link:
+          type: string
+          example: '</docs/client-signing>; rel="deprecation"'
     ErrorEnvelope:
       type: object
       required: [error]
@@ -436,6 +803,12 @@ components:
                 - CONFLICT
                 - RATE_LIMITED
                 - INTERNAL_ERROR
+                - INSUFFICIENT_RESERVE
+                - ASSET_ISSUER_NOT_FOUND
+                - ASSET_ALREADY_ADDED
+                - TRUSTLINE_NOT_FOUND
+                - TRUSTLINE_HAS_BALANCE
+                - ASSET_HAS_ACTIVE_SPEND_LIMIT
             message:
               type: string
             details:

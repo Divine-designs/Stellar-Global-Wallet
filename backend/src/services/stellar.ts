@@ -1,5 +1,5 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
-import { NotFoundError, ValidationError } from "../errors/appError";
+import { AppError, NotFoundError, ValidationError } from "../errors/appError";
 import { config } from "../config";
 import { validatePathAssets } from "../validation/stellarAsset";
 import { AccountLock, InProcessAccountLock } from "./locks/accountLock";
@@ -11,6 +11,7 @@ import {
 } from "./stellarErrors";
 import type { TransactionSummary } from "@stellar-global-wallet/types";
 import { fromStroops, toStroops } from "../utils/stroops";
+import { isGAddress } from "../utils/stellarAddress";
 
 // Re-exported for backward compatibility — this used to be declared locally
 // here. The canonical definition now lives in packages/types (issue #107)
@@ -129,6 +130,106 @@ export class StellarService {
       if (hasResponseStatus(err, 404)) return null;
       throw err;
     }
+  }
+
+  /**
+   * Builds an unsigned changeTrust transaction and reports its reserve impact.
+   * The spendable balance uses the same reserve/liability calculation as the
+   * payment precheck and includes one transaction fee.
+   */
+  async buildTrustlineTransaction(params: {
+    account: string;
+    asset: { code: string; issuer: string };
+    limit?: string;
+  }): Promise<{
+    xdr: string;
+    networkPassphrase: string;
+    reserveDelta: "0.5" | "-0.5" | "0";
+    spendableXlmAfter: string;
+  }> {
+    const { account: accountId, asset: assetInfo } = params;
+    const limit = params.limit ?? "922337203685.4775807";
+
+    if (
+      !/^[A-Za-z0-9]{1,12}$/.test(assetInfo.code) ||
+      assetInfo.code.toUpperCase() === "XLM" ||
+      !isGAddress(assetInfo.issuer) ||
+      !/^\d+(?:\.\d{1,7})?$/.test(limit)
+    ) {
+      throw new AppError("Trustline details are invalid", {
+        code: "VALIDATION_ERROR",
+        status: 400,
+      });
+    }
+
+    const limitStroops = BigInt(toStroops(limit));
+    const isRemoval = limitStroops === 0n;
+    if ((!isRemoval && limitStroops <= 0n) || limitStroops > 9223372036854775807n) {
+      throw new AppError("Trustline limit is outside the supported range", {
+        code: "VALIDATION_ERROR",
+        status: 400,
+      });
+    }
+
+    if (assetInfo.issuer === accountId) {
+      throw new AppError("An account cannot create a trustline to itself", {
+        code: "VALIDATION_ERROR",
+        status: 400,
+      });
+    }
+
+    if (!(await this.loadAccountOrNull(assetInfo.issuer))) {
+      throw new NotFoundError("The asset issuer account was not found", "ASSET_ISSUER_NOT_FOUND");
+    }
+
+    const sourceAccount = await this.getAccount(accountId);
+    const asset = new StellarSdk.Asset(assetInfo.code, assetInfo.issuer);
+    const trustline = (sourceAccount.balances as unknown as BalanceLine[]).find(
+      (balance) =>
+        (balance.asset_type === "credit_alphanum4" ||
+          balance.asset_type === "credit_alphanum12") &&
+        balance.asset_code === assetInfo.code &&
+        balance.asset_issuer === assetInfo.issuer
+    );
+
+    if (isRemoval && !trustline) {
+      throw new NotFoundError("The account does not have this trustline", "TRUSTLINE_NOT_FOUND");
+    }
+    if (isRemoval && trustline && BigInt(toStroops(trustline.balance)) > 0n) {
+      throw new AppError("The trustline must have a zero balance before removal", {
+        code: "TRUSTLINE_HAS_BALANCE",
+        status: 409,
+      });
+    }
+
+    const currentSpendable = BigInt(
+      toStroops(spendableBalance(sourceAccount, StellarSdk.Asset.native()) ?? "0")
+    );
+    const removalReleasesReserve =
+      isRemoval && (!trustline?.sponsor || trustline.sponsor === accountId);
+    const reserveDelta = removalReleasesReserve ? -5000000n : trustline ? 0n : 5000000n;
+    const spendableAfter = currentSpendable - reserveDelta;
+    if (spendableAfter < 0n) {
+      throw new AppError("The account does not have enough XLM for the trustline reserve", {
+        code: "INSUFFICIENT_RESERVE",
+        status: 422,
+      });
+    }
+
+    const transaction = new StellarSdk.TransactionBuilder(sourceAccount, {
+      fee: StellarSdk.BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(StellarSdk.Operation.changeTrust({ asset, limit: isRemoval ? "0" : limit }))
+      .setTimeout(180)
+      .build();
+
+    return {
+      xdr: transaction.toXDR(),
+      networkPassphrase: this.networkPassphrase,
+      reserveDelta: reserveDelta === 0n ? "0" : isRemoval ? "-0.5" : "0.5",
+      spendableXlmAfter: fromStroops(spendableAfter),
+    };
   }
 
   async getBalances(publicKey: string): Promise<Record<string, string>> {
@@ -1085,6 +1186,7 @@ interface BalanceLine {
   asset_issuer?: string;
   balance: string;
   selling_liabilities?: string;
+  sponsor?: string;
   is_authorized?: boolean;
 }
 

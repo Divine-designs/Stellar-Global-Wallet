@@ -1,176 +1,79 @@
-# Client-side signing sequence (web & mobile)
+# Client-side signing (web and mobile)
 
-This document explains how a wallet client turns a user intent ("send 10 XLM
-to `G...`") into a signed, submitted Stellar transaction. It is written for
-frontend contributors who are new to Stellar. Read it top to bottom once; after
-that use the troubleshooting table at the end.
+The backend exposes operation-specific builders that return unsigned XDR. The
+client must present the operation and its effects, then ask the user's wallet
+to sign with the network passphrase returned by the API. Never send a user's
+secret key to the backend.
 
-Concepts referenced here:
+`GET /api/v1/config` is public and returns the active network passphrase,
+Horizon/Soroban URLs, contract IDs, feature availability, and API/client
+versions. It does not expose server secrets.
 
-- [Transactions & operations](https://developers.stellar.org/docs/learn/fundamentals/transactions/operations-and-transactions)
-- [Sequence numbers](https://developers.stellar.org/docs/learn/encyclopedia/transactions-specialized/sequence-numbers)
-- [Fee-bump transactions](https://developers.stellar.org/docs/learn/encyclopedia/transactions-specialized/fee-bump-transactions)
-- [Soroban smart contracts](https://developers.stellar.org/docs/build/smart-contracts/overview)
-- [Stellar Wallets Kit](https://stellarwalletskit.dev/)
-- [Horizon API reference](https://developers.stellar.org/docs/data/apis/horizon/api-reference)
-- [MDN Server-sent events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events)
+## Build and sign a trustline change
 
-## The flow at a glance
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant App as App (web/mobile)
-    participant API as Backend API
-    participant Wallet as Wallet (Freighter / xBull / WalletConnect / keystore)
-    participant Net as Horizon / Soroban RPC
-    participant SSE as SSE status stream
-
-    App->>API: POST /wallet/send (intent)
-    API-->>App: unsigned XDR + network passphrase + operationType
-    App->>Wallet: signTransaction(xdr, { networkPassphrase })
-    Wallet-->>App: signed XDR (or user rejection)
-    App->>API: POST /wallet/submit (signed XDR)
-    API->>Net: submitTransaction
-    Net-->>API: hash / error (tx_bad_seq, tx_too_late, ...)
-    API-->>App: { hash, status }
-    App->>SSE: subscribe(hash)
-    SSE-->>App: pending → success | failed
-```
-
-Key rules:
-
-1. **The client never builds the transaction itself.** The API returns an
-   unsigned XDR built against the current sequence number and fee. Signing is
-   the only step the client owns.
-2. **The client never submits directly to Horizon.** Submit through the API so
-   the indexer and SSE stream see the transaction.
-3. **The signed XDR is single-use.** If submission fails with a retryable error,
-   ask the API to rebuild — do not re-submit the same XDR.
-
-## Signing with Freighter (web)
+`POST /api/v1/wallet/trustline/build` requires authentication and accepts an
+account, a non-native asset (`code` and checksum-validated `issuer`), and an
+optional decimal-string `limit`. Omit `limit` to use the maximum supported
+limit; pass `"0"` to remove an existing zero-balance trustline. Before signing,
+show `reserveDelta` and `spendableXlmAfter` to the user. An unsponsored trustline addition locks 0.5 XLM of reserve; removing an
+unsponsored trustline releases 0.5 XLM. Removing a sponsored trustline can
+have no reserve impact for the account.
 
 ```ts
-import { signTransaction, isConnected } from '@stellar/freighter-api';
+import { signTransaction } from "@stellar/freighter-api";
 
-// 1. Ask the API to build the transaction.
-const build = await fetch('/api/v1/wallet/send', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` },
-  body: JSON.stringify({ sourcePublicKey, destinationPublicKey, amount, asset, memo }),
-}).then((r) => r.json());
+const response = await fetch("/api/v1/wallet/trustline/build", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
+  },
+  body: JSON.stringify({
+    account: sourcePublicKey,
+    asset: { code: "USDC", issuer: assetIssuer },
+  }),
+});
 
-// 2. Sign with the wallet. The passphrase must match the network the API used.
-if (!(await isConnected()).isConnected) throw new Error('Freighter not installed');
+if (!response.ok) {
+  throw new Error("Could not build the trustline transaction");
+}
+
+const build = await response.json();
+// Show build.reserveDelta and build.spendableXlmAfter for user confirmation.
 const { signedTxXdr, error } = await signTransaction(build.xdr, {
   networkPassphrase: build.networkPassphrase,
 });
-if (error) throw new Error(error); // user rejected or wallet error
-
-// 3. Submit through the API.
-const result = await fetch('/api/v1/wallet/submit', {
-  method: 'POST',
-  headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` },
-  body: JSON.stringify({ signedXdr: signedTxXdr }),
-}).then((r) => r.json());
+if (error) throw new Error(error);
 ```
 
-## Signing with Stellar Wallets Kit (web, multi-wallet)
+The backend also exposes `POST /api/v1/contract/wallet/assets/build` and
+`POST /api/v1/contract/wallet/assets/remove/build` for the Soroban wallet asset
+registry. Those routes return unsigned XDR; native XLM uses
+`{ code: "XLM", issuer: null }`.
 
-Stellar Wallets Kit wraps Freighter, xBull, WalletConnect and others behind one
-API. Use it when you want the user to pick a wallet.
+## Submission availability
+
+This API version does not expose a generic endpoint for submitting
+client-signed XDR. Do not assume that `/wallet/submit` exists, and do not use a
+deprecated secret-key route as a substitute. Submission of client-signed XDR
+is outside the scope of the trustline, asset-registry, configuration, and
+deprecation changes documented here.
+
+## Wallet signing
+
+Use the network passphrase returned by the build response. For Stellar
+Wallets Kit, pass both the XDR and the account selected by the user:
 
 ```ts
-import { StellarWalletsKit, WalletNetwork, allowAllModules } from '@creit.tech/stellar-wallets-kit';
-
-StellarWalletsKit.init({ network: WalletNetwork.TESTNET, modules: allowAllModules() });
-
-// Let the user choose a wallet (renders the kit's modal).
-await StellarWalletsKit.authModal();
-
-// Sign the XDR returned by the API.
-const { signedTxXdr } = await StellarWalletsKit.signTransaction(build.xdr, {
+const { signedTxXdr, error } = await StellarWalletsKit.signTransaction(build.xdr, {
   networkPassphrase: build.networkPassphrase,
   address: sourcePublicKey,
 });
+if (error) throw new Error(error);
 ```
 
-- **xBull** is included in `allowAllModules()`; no extra setup.
-- **WalletConnect** requires a project ID from
-  [WalletConnect Cloud](https://cloud.walletconnect.com/) and is the recommended
-  path for mobile browsers and native mobile apps (see below).
-
-## Signing with a local Keypair (tests only)
-
-Never ship a secret key in a client. Use this only in unit/integration tests.
-
-```ts
-import { Keypair, TransactionBuilder, Networks } from '@stellar/stellar-sdk';
-
-const kp = Keypair.fromSecret(process.env.TEST_SECRET!);
-const tx = TransactionBuilder.fromXDR(build.xdr, build.networkPassphrase);
-tx.sign(kp);
-const signedXdr = tx.toXDR();
-```
-
-## Mobile: WalletConnect vs local keystore
-
-| | WalletConnect | Local keystore |
-| --- | --- | --- |
-| Key custody | User's external wallet app | App (device secure storage) |
-| UX | Deep-link to wallet, approve, return | In-app biometric prompt |
-| Setup | WalletConnect project ID + relay | Keychain / Keystore integration |
-| Risk | Depends on wallet app | App compromise = key compromise |
-| Recommended for | Most users | Power users / custodial flows |
-
-Both paths produce the same signed XDR and submit through the API. The only
-difference is where the private key lives.
-
-## Soroban: auth entries, simulation and rebuilds
-
-Soroban contract invocations differ from classic payments:
-
-1. **Simulation first.** The API simulates the invocation to discover the
-   required footprint (ledger keys) and the resource fee. The unsigned XDR it
-   returns already includes the simulated footprint and fee.
-2. **Auth entries.** If the contract call requires authorization, the XDR
-   contains `SorobanAuthorizationEntry` values. The wallet signs these as part
-   of `signTransaction`; the client must not strip or reorder them.
-3. **Why a rebuild may be needed.** Simulation results are only valid for a
-   short window (the current ledger plus a few). If the user takes too long to
-   sign, or the footprint's ledger entries change, submission fails with
-   `tx_too_late` or a footprint error. In that case call the build endpoint
-   again — do **not** re-sign the stale XDR.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    App->>API: POST /wallet/contract-call (intent)
-    API->>Net: simulateTransaction
-    Net-->>API: footprint + resource fee
-    API-->>App: unsigned XDR (with auth entries)
-    App->>Wallet: signTransaction(xdr)
-    Wallet-->>App: signed XDR
-    App->>API: POST /wallet/submit
-    API->>Net: sendTransaction
-    Net-->>API: hash / error
-```
-
-## Troubleshooting
-
-| Error | Meaning | What to do |
-| --- | --- | --- |
-| `tx_bad_seq` | The source account's sequence number changed (another tx landed first). | Rebuild the transaction via the API to pick up the new sequence, then re-sign. Never retry the same XDR. |
-| `tx_too_late` | The transaction's `timebounds.maxTime` has passed. | Rebuild with fresh timebounds and re-sign. For Soroban, also re-simulate. |
-| `tx_insufficient_fee` | The fee is below the current network minimum. | Rebuild to get the current fee, or submit a [fee-bump](https://developers.stellar.org/docs/learn/encyclopedia/transactions-specialized/fee-bump-transactions) transaction. |
-| `op_no_trust` | The destination account has no trustline for the asset. | Ask the user to add a trustline, or send XLM instead. The precheck endpoint reports this as `NO_TRUSTLINE`. |
-| `PATH_EXPIRED` | A path-payment offer used in the path has expired. | Rebuild the path payment to get fresh offers and re-sign. |
-
-### Retry policy
-
-- `tx_bad_seq`, `tx_too_late`, `tx_insufficient_fee`, `PATH_EXPIRED` are
-  **retryable after a rebuild**. Rebuild → re-sign → resubmit, at most 3 times.
-- `op_no_trust` and other `op_*` errors are **not retryable** without user
-  action; surface the message and stop.
-- A user rejection from the wallet is not an error to retry — return to the
-  review screen.
+Never put a secret key in a web/mobile bundle, request body, log, or telemetry.
+The legacy `/send`, `/fee-bump`, path-payment, `/partial-transaction`,
+`/contract/wallet/spend`, and `/keypair` routes are deprecated and emit
+`Deprecation`, `Sunset`, and `Link` headers. See the migration table in the
+[backend README](../README.md#legacy-secret-key-route-migration).

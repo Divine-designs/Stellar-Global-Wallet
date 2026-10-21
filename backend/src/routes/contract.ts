@@ -3,6 +3,7 @@ import { body, param } from "express-validator";
 import { assertValidRequest } from "../middleware/requestValidation";
 import { GlobeWalletContract } from "../services/contracts/globeWallet";
 import { jwtAuth } from "../middleware/jwtAuth";
+import { deprecated } from "../middleware/deprecated";
 import { isGAddress, publicKeyMessage } from "../utils/stellarAddress";
 
 export function createContractRouter(globeWallet: GlobeWalletContract): Router {
@@ -119,7 +120,83 @@ export function createContractRouter(globeWallet: GlobeWalletContract): Router {
     }
   });
 
+  contractRouter.use("/wallet/spend", (req, res, next) => {
+    if (req.method === "POST") {
+      return deprecated("POST /api/v1/contract/wallet/spend")(req, res, next);
+    }
+    return next();
+  });
+
   contractRouter.use(jwtAuth);
+
+  // #8 — build unsigned XDR for the wallet's asset registry.
+  contractRouter.post(
+    "/wallet/assets/build",
+    body().custom((value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      return Object.keys(value).every((key) => key === "user" || key === "asset");
+    }),
+    body("user")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    body("asset")
+      .isObject()
+      .custom((asset: unknown) => {
+        if (!asset || typeof asset !== "object" || Array.isArray(asset)) return false;
+        const value = asset as Record<string, unknown>;
+        return (
+          Object.keys(value).every((key) => key === "code" || key === "issuer") &&
+          typeof value.code === "string" &&
+          /^[A-Za-z0-9]{1,12}$/.test(value.code) &&
+          ((value.code === "XLM" && value.issuer === null) ||
+            (value.code !== "XLM" &&
+              typeof value.issuer === "string" &&
+              isGAddress(value.issuer)))
+        );
+      })
+      .withMessage("asset must contain a 1-12 character code and a valid issuer (null for XLM)"),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const xdr = await globeWallet.buildAddAssetTx({
+          user: req.body.user,
+          asset: req.body.asset,
+        });
+        res.json({ xdr });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  // #8 — build unsigned XDR for removing an asset from the wallet registry.
+  contractRouter.post(
+    "/wallet/assets/remove/build",
+    body().custom((value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      return Object.keys(value).every((key) => key === "user" || key === "assetCode");
+    }),
+    body("user")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    body("assetCode").matches(/^[A-Za-z0-9]{1,12}$/),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const xdr = await globeWallet.buildRemoveAssetTx({
+          user: req.body.user,
+          assetCode: req.body.assetCode,
+        });
+        res.json({ xdr });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
 
   // #80 — Build unsigned transaction XDR for admin propose
   contractRouter.post(
