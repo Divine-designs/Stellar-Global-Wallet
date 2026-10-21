@@ -1,14 +1,9 @@
 import * as StellarSdk from "@stellar/stellar-sdk";
 import { config } from "../../config";
-import { SorobanService, ContractCallResult, PreparedInvocation } from "../soroban";
-import {
-  SorobanContractError,
-  SorobanNotConfiguredError,
-  SorobanSimulationError,
-  SorobanTransactionError,
-} from "../sorobanErrors";
-import type { SubmitSignedPending, SubmitSignedResult } from "../transactionEnvelope";
-import { describeGlobeWalletError, extractContractErrorCode, getGlobeWalletApiCode } from "./globeWalletErrors";
+import { AppError } from "../../errors/appError";
+import { SorobanService, ContractCallResult } from "../soroban";
+import { SorobanNotConfiguredError, SorobanSimulationError, SorobanTransactionError } from "../sorobanErrors";
+import { describeGlobeWalletError } from "./globeWalletErrors";
 import type {
   AssetInfo,
   AllowedTokenInfo,
@@ -152,6 +147,69 @@ function withContractErrorCodes<T>(promise: Promise<T>): Promise<T> {
  */
 export class GlobeWalletContract {
   constructor(private readonly soroban: SorobanService) {}
+
+  /** Builds unsigned XDR for registering a wallet asset (#8). */
+  async buildAddAssetTx(params: {
+    user: string;
+    asset: AssetInfo;
+  }): Promise<string> {
+    const contractId = requireContractId();
+    const { user, asset } = params;
+    const currentAssets = await this.getAssets(user);
+    if (currentAssets.some((current) => current.code.toLowerCase() === asset.code.toLowerCase())) {
+      throw new AppError("This asset has already been added to the wallet", {
+        code: "ASSET_ALREADY_ADDED",
+        status: 409,
+      });
+    }
+    const assetInfo = StellarSdk.xdr.ScVal.scvMap([
+      new StellarSdk.xdr.ScMapEntry({
+        key: StellarSdk.xdr.ScVal.scvSymbol("code"),
+        val: StellarSdk.nativeToScVal(asset.code, { type: "string" }),
+      }),
+      new StellarSdk.xdr.ScMapEntry({
+        key: StellarSdk.xdr.ScVal.scvSymbol("issuer"),
+        val:
+          asset.issuer === null
+            ? StellarSdk.xdr.ScVal.scvVoid()
+            : StellarSdk.nativeToScVal(asset.issuer, { type: "address" }),
+      }),
+    ]);
+    return this.soroban.buildUnsignedTransaction({
+      contractId,
+      method: "add_asset",
+      sourcePublicKey: user,
+      args: [
+        StellarSdk.nativeToScVal(user, { type: "address" }),
+        assetInfo,
+      ],
+    });
+  }
+
+  /** Builds unsigned XDR for removing a wallet asset (#8). */
+  async buildRemoveAssetTx(params: {
+    user: string;
+    assetCode: string;
+  }): Promise<string> {
+    const contractId = requireContractId();
+    const { user, assetCode } = params;
+    const allowance = await this.getSpendAllowance(user, assetCode);
+    if (!allowance.unlimited) {
+      throw new AppError("Remove the asset's spend limit before removing it", {
+        code: "ASSET_HAS_ACTIVE_SPEND_LIMIT",
+        status: 409,
+      });
+    }
+    return this.soroban.buildUnsignedTransaction({
+      contractId,
+      method: "remove_asset",
+      sourcePublicKey: user,
+      args: [
+        StellarSdk.nativeToScVal(user, { type: "address" }),
+        StellarSdk.nativeToScVal(assetCode, { type: "string" }),
+      ],
+    });
+  }
 
   /** Read-only: the caller's whitelisted assets. Free — simulated, never submitted. */
   async getAssets(userPublicKey: string): Promise<AssetInfo[]> {

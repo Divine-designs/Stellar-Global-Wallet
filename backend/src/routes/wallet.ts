@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { body, param } from "express-validator";
 import { jwtAuth } from "../middleware/jwtAuth";
+import { deprecated } from "../middleware/deprecated";
 import { assertValidRequest } from "../middleware/requestValidation";
 import { logKeypairIssuance } from "../services/auditLog";
 import { StellarService } from "../services/stellar";
@@ -124,11 +125,68 @@ async function handleIdempotentRequest(
 export function createWalletRouter(stellar: StellarService): Router {
   const walletRouter = Router();
 
-  // Build/submit routes for client-side signing. Mounted ahead of the
-  // router-wide jwtAuth below because they gate themselves.
-  walletRouter.use(createClientSigningRouter(stellar));
+  const deprecatedRoutes: Record<string, string> = {
+    "/send": "POST /api/v1/wallet/send",
+    "/fee-bump": "POST /api/v1/wallet/fee-bump",
+    "/path-payment-strict-send": "POST /api/v1/wallet/path-payment-strict-send",
+    "/path-payment-strict-receive": "POST /api/v1/wallet/path-payment-strict-receive",
+    "/partial-transaction": "POST /api/v1/wallet/partial-transaction",
+    "/keypair": "POST /api/v1/wallet/keypair",
+  };
+  walletRouter.use((req, res, next) => {
+    if (req.method !== "POST") return next();
+    const route = deprecatedRoutes[req.path];
+    if (route) return deprecated(route)(req, res, next);
+    return next();
+  });
 
   walletRouter.use(jwtAuth);
+
+  // #9 — build unsigned XDR for adding or removing a classic Stellar trustline.
+  walletRouter.post(
+    "/trustline/build",
+    body().custom((value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+      return Object.keys(value).every((key) => ["account", "asset", "limit"].includes(key));
+    }),
+    body("account")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(publicKeyMessage),
+    body("asset")
+      .isObject()
+      .custom((asset: unknown) => {
+        if (!asset || typeof asset !== "object" || Array.isArray(asset)) return false;
+        const value = asset as Record<string, unknown>;
+        return (
+          Object.keys(value).every((key) => key === "code" || key === "issuer") &&
+          typeof value.code === "string" &&
+          /^[A-Za-z0-9]{1,12}$/.test(value.code) &&
+          typeof value.issuer === "string" &&
+          isGAddress(value.issuer)
+        );
+      })
+      .withMessage("asset must include a valid 1-12 character code and issuer account"),
+    body("limit")
+      .optional()
+      .isString()
+      .matches(/^(?:0|[1-9]\d*)(?:\.\d{1,7})?$/)
+      .withMessage('limit must be a decimal string or "0" to remove the trustline'),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const result = await stellar.buildTrustlineTransaction({
+          account: req.body.account,
+          asset: req.body.asset,
+          limit: req.body.limit,
+        });
+        res.json(result);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
 
   walletRouter.post(
     "/payment-requests",
@@ -268,14 +326,55 @@ export function createWalletRouter(stellar: StellarService): Router {
       .isLength({ min: 56, max: 56 })
       .bail()
       .custom(isGAddress)
-      .withMessage(publicKeyMessage),
+      .withMessage(destinationMessage),
+    body("sendAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("destAsset")
+      .custom((asset: unknown) => asset === "XLM" || isValidIssuedAsset(asset))
+      .withMessage('destAsset must be "XLM" or CODE:ISSUER'),
+    body("destMin").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("path")
+      .optional()
+      .custom((path: unknown) => {
+        validatePathAssets(path);
+        return true;
+      }),
+    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
     async (req, res, next) => {
       try {
         assertValidRequest(req);
-        const account = await stellar.server.loadAccount(req.params.publicKey);
-        const reserves = computeReserveBreakdown(account);
-        const assets = computeAssetSpendable(account);
-        res.json({ reserves, assets });
+        const result = await stellar.pathPaymentStrictSend(req.body);
+        res.json({ hash: result.hash, successful: result.successful });
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  walletRouter.post(
+    "/path-payment-strict-receive",
+    body("sourceSecretKey").isLength({ min: 56, max: 56 }),
+    body("destinationPublicKey")
+      .isLength({ min: 56, max: 56 })
+      .bail()
+      .custom(isGAddress)
+      .withMessage(destinationMessage),
+    body("destAmount").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("destAsset")
+      .custom((asset: unknown) => asset === "XLM" || isValidIssuedAsset(asset))
+      .withMessage('destAsset must be "XLM" or CODE:ISSUER'),
+    body("sendMax").custom(isValidStellarAmount).withMessage(amountMessage),
+    body("path")
+      .optional()
+      .custom((path: unknown) => {
+        validatePathAssets(path);
+        return true;
+      }),
+    body("memo").optional().isString().custom(isValidMemoText).withMessage(memoTextMessage),
+    async (req, res, next) => {
+      try {
+        assertValidRequest(req);
+        const result = await stellar.pathPaymentStrictReceive(req.body);
+        res.json({ hash: result.hash, successful: result.successful });
       } catch (err) {
         next(err);
       }
@@ -449,7 +548,7 @@ export function createWalletRouter(stellar: StellarService): Router {
   );
 
   walletRouter.post(
-    "/send",
+    "/partial-transaction",
     body("sourceSecretKey").isLength({ min: 56, max: 56 }),
     body("destinationPublicKey")
       .isLength({ min: 56, max: 56 })
