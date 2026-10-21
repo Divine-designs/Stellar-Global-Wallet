@@ -36,6 +36,12 @@ Helmet's default Content-Security-Policy blocks the inline scripts Swagger UI
 needs, so the docs routes get a route-specific CSP that allows them. The rest of
 the API keeps the strict default policy.
 
+The routes that let a wallet sign for itself (`/wallet/send/build`,
+`/wallet/submit`, the path payment `/build` routes and the Soroban
+`/contract/wallet/spend/build` + `/contract/wallet/submit`) are described in
+[`docs/openapi-client-signing.yaml`](./docs/openapi-client-signing.yaml) and
+walked through in [`docs/client-signing.md`](./docs/client-signing.md).
+
 ## Tests
 
 ```bash

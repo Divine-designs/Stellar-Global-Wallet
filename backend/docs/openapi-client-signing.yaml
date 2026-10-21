@@ -1,0 +1,438 @@
+# OpenAPI 3.1 entries for the non-custodial build/submit routes (#1, #2, #3,
+# #4). Like openapi-prices-assets.yaml this is a fragment, written to be
+# merged into the full spec once #15 lands. See docs/client-signing.md for
+# the flow these routes implement: the server builds an unsigned transaction,
+# the client signs it in its own wallet, the server submits it.
+#
+# None of these routes accepts a secret key. A secret-looking or otherwise
+# unknown body field is rejected with 400 VALIDATION_ERROR.
+#
+# Amounts are decimal strings with at most 7 decimal places, never JSON
+# numbers. The one exception is `amount` on the Soroban spend build, which is
+# an integer string in the asset's smallest unit (stroops), like the existing
+# POST /contract/wallet/spend.
+openapi: 3.1.0
+info:
+  title: GlobeWallet API — build and submit for client-side signing
+  version: "1.0"
+paths:
+  /api/v1/wallet/send/build:
+    post:
+      summary: Build an unsigned payment (#1)
+      description: >-
+        Returns an unsigned payment envelope for the client to sign. Applies
+        the same SEP-29 memo check as POST /wallet/send (MEMO_REQUIRED),
+        builds `createAccount` instead of `payment` for an unfunded
+        destination that receives at least 1 XLM, and accepts a muxed M...
+        destination. The transaction expires 180 seconds after the build.
+        Nothing is submitted and no sequence number is reserved, so two builds
+        in a row return the same `sequence`; whichever is signed and submitted
+        first wins.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourcePublicKey, destinationPublicKey, amount]
+              properties:
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                destinationPublicKey:
+                  type: string
+                  description: A G... account or a muxed M... address.
+                amount: { $ref: "#/components/schemas/Amount" }
+                asset: { $ref: "#/components/schemas/Asset" }
+                memo:
+                  type: string
+                  description: MEMO_TEXT, at most 28 UTF-8 bytes.
+      responses:
+        "200":
+          description: Unsigned payment
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnsignedTransaction"
+                  - type: object
+                    required: [operationType]
+                    properties:
+                      operationType: { type: string, enum: [payment, createAccount] }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The source account does not exist (`SOURCE_ACCOUNT_NOT_FOUND`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /api/v1/wallet/path-payment-strict-send/build:
+    post:
+      summary: Build an unsigned strict-send path payment (#3)
+      description: >-
+        The client sends the exact `sendAmount` and the destination amount
+        quoted by the /wallet/paths/strict-send route. `destMin` is the quote less
+        `slippageBps` basis points, rounded down to a stroop, computed
+        server-side in integer arithmetic. Fails with 400 when the destination
+        does not exist (`DESTINATION_NOT_FUNDED`), has no trustline for
+        `destAsset` (`DESTINATION_NO_TRUSTLINE`) or requires a memo
+        (`MEMO_REQUIRED`).
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourcePublicKey, destinationPublicKey, sendAmount, destAsset, quotedDestAmount]
+              properties:
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                destinationPublicKey:
+                  type: string
+                  description: A G... account or a muxed M... address.
+                sendAsset: { $ref: "#/components/schemas/Asset" }
+                sendAmount: { $ref: "#/components/schemas/Amount" }
+                destAsset: { $ref: "#/components/schemas/Asset" }
+                quotedDestAmount: { $ref: "#/components/schemas/Amount" }
+                path: { $ref: "#/components/schemas/PathAssets" }
+                slippageBps: { $ref: "#/components/schemas/SlippageBps" }
+                memo: { type: string, description: "MEMO_TEXT, at most 28 UTF-8 bytes." }
+      responses:
+        "200":
+          description: Unsigned path payment
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnsignedTransaction"
+                  - $ref: "#/components/schemas/PathPaymentDisplay"
+                  - type: object
+                    required: [minReceive]
+                    properties:
+                      minReceive:
+                        { $ref: "#/components/schemas/Amount", description: "`destMin`: the least the destination will receive." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The source account does not exist (`SOURCE_ACCOUNT_NOT_FOUND`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /api/v1/wallet/path-payment-strict-receive/build:
+    post:
+      summary: Build an unsigned strict-receive path payment (#3)
+      description: >-
+        The client sends the exact `destAmount` and the source amount quoted by
+        GET /wallet/paths/strict-receive. `sendMax` is the quote plus
+        `slippageBps` basis points, rounded up to a stroop. Same destination
+        pre-checks as strict-send.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [sourcePublicKey, destinationPublicKey, destAsset, destAmount, quotedSendAmount]
+              properties:
+                sourcePublicKey: { $ref: "#/components/schemas/AccountId" }
+                destinationPublicKey:
+                  type: string
+                  description: A G... account or a muxed M... address.
+                sendAsset: { $ref: "#/components/schemas/Asset" }
+                quotedSendAmount: { $ref: "#/components/schemas/Amount" }
+                destAsset: { $ref: "#/components/schemas/Asset" }
+                destAmount: { $ref: "#/components/schemas/Amount" }
+                path: { $ref: "#/components/schemas/PathAssets" }
+                slippageBps: { $ref: "#/components/schemas/SlippageBps" }
+                memo: { type: string, description: "MEMO_TEXT, at most 28 UTF-8 bytes." }
+      responses:
+        "200":
+          description: Unsigned path payment
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnsignedTransaction"
+                  - $ref: "#/components/schemas/PathPaymentDisplay"
+                  - type: object
+                    required: [maxSend]
+                    properties:
+                      maxSend:
+                        { $ref: "#/components/schemas/Amount", description: "`sendMax`: the most the source will spend." }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The source account does not exist (`SOURCE_ACCOUNT_NOT_FOUND`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /api/v1/wallet/submit:
+    post:
+      summary: Submit a client-signed transaction (#2)
+      description: >-
+        Submits the signed envelope exactly as signed (plain or fee-bump); it
+        is never re-signed and never retried with a new sequence number. It is
+        rejected without calling Horizon when it does not parse
+        (`INVALID_TRANSACTION`, reason `MALFORMED_XDR`), has no signature
+        (`UNSIGNED`), carries a signature that does not verify under this
+        network's passphrase (`WRONG_NETWORK`), or `timeBounds.maxTime` has
+        passed (`TX_EXPIRED`). Horizon `tx_too_late` is also `TX_EXPIRED`, and
+        a `tx_bad_seq` for a hash already on the ledger is `TX_ALREADY_SUBMITTED`
+        (409). Path payments rejected with `op_too_few_offers`,
+        `op_under_dest_min` or `op_over_source_max` are `PATH_EXPIRED` (409):
+        re-quote and rebuild. Other Horizon rejections are `HORIZON_REJECTED`
+        with `details.horizonResultCodes`.
+
+
+        Send an `Idempotency-Key` header or an `idempotencyKey` body field to
+        make retries safe: a repeat with the same key from the same source
+        account within 24 hours replays the first `{ hash, successful }`
+        instead of submitting again. Failures are never cached.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          schema: { type: string, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [signedXdr]
+              properties:
+                signedXdr: { type: string, description: Base64 XDR of the signed envelope. }
+                idempotencyKey: { type: string, maxLength: 255 }
+      responses:
+        "200":
+          description: Accepted by Horizon
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitResult" }
+        "202":
+          description: Horizon timed out. The transaction may still land; poll for `hash`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitPending" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`TX_ALREADY_SUBMITTED`, `SEQUENCE_CONFLICT` or `PATH_EXPIRED`."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /api/v1/contract/wallet/spend/build:
+    post:
+      summary: Build an unsigned Soroban record_spend (#4)
+      description: >-
+        Simulates `record_spend` for `userPublicKey` and returns the assembled
+        transaction (footprint and resource fee attached) unsigned. The user
+        signs the envelope and, for any entry in `authEntries` that uses
+        address credentials, the auth entry too. A spend that would break the
+        daily limit fails here with its contract error code
+        (`SPEND_LIMIT_EXCEEDED`, 422) before anyone signs. If RPC is down the
+        response is 503 `SOROBAN_UNAVAILABLE` with `retryable: true`. Replaces
+        the `userSecretKey` flow of POST /contract/wallet/spend, which remains
+        until it is deprecated.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [userPublicKey, assetCode, amount]
+              properties:
+                userPublicKey: { $ref: "#/components/schemas/AccountId" }
+                assetCode: { type: string, pattern: "^[A-Za-z0-9]{1,12}$", example: XLM }
+                amount:
+                  type: string
+                  pattern: "^[1-9][0-9]*$"
+                  description: Integer amount in the asset's smallest unit (stroops), at most the i128 maximum.
+                  example: "1000000"
+      responses:
+        "200":
+          description: Prepared (simulated and assembled) invocation
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/UnsignedTransaction"
+                  - type: object
+                    required: [minResourceFee, authEntries, latestLedger]
+                    properties:
+                      minResourceFee: { type: string, description: "Soroban resource fee in stroops, already included in `fee`." }
+                      authEntries:
+                        type: array
+                        items: { type: string, description: "Base64 SorobanAuthorizationEntry XDR." }
+                      latestLedger: { type: integer, description: Ledger the simulation ran against. }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: The user's account does not exist (`SOURCE_ACCOUNT_NOT_FOUND`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "422":
+          description: Simulation failed. `error.code` is the contract error (for example `SPEND_LIMIT_EXCEEDED`) or `SOROBAN_SIMULATION_FAILED`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503":
+          description: "Soroban RPC is unavailable (`SOROBAN_UNAVAILABLE`, `retryable: true`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  /api/v1/contract/wallet/submit:
+    post:
+      summary: Submit a signed Soroban transaction (#4)
+      description: >-
+        Sends the signed XDR, then polls `getTransaction` until it is
+        `SUCCESS` or `FAILED`, or 30 seconds pass (202 with the hash). If the
+        footprint, sequence or fee is no longer valid
+        (`txSorobanInvalid`, `txBadSeq`, `txInsufficientFee`) the response is
+        409 `SOROBAN_REBUILD_REQUIRED` with `retryable: true`: build again
+        (which re-simulates) and sign the new transaction. Envelope checks are
+        the same as POST /wallet/submit.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [signedXdr]
+              properties:
+                signedXdr: { type: string, description: Base64 XDR of the signed envelope. }
+      responses:
+        "200":
+          description: Final status `SUCCESS`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitResult" }
+        "202":
+          description: Not final within 30 seconds; poll for `hash`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SubmitPending" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: "`SOROBAN_REBUILD_REQUIRED` (retryable after a rebuild)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "502":
+          description: The transaction passed simulation but failed on-chain (`SOROBAN_TX_FAILED`, with `details.hash`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+        "503":
+          description: "Soroban RPC is unavailable or busy (`SOROBAN_UNAVAILABLE`, `retryable: true`)."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+components:
+  responses:
+    BadRequest:
+      description: Validation failed, including any secret-key or unknown field, or the envelope cannot be submitted.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: Request validation failed
+              details:
+                - location: body
+                  path: sourceSecretKey
+                  message: Secret keys are never accepted by this endpoint; sign the returned XDR client-side
+    Unauthorized:
+      description: Missing or invalid bearer token.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorEnvelope" }
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { type: string, description: Stable machine-readable code. }
+            message: { type: string }
+            details: {}
+            retryable: { type: boolean }
+            requestId: { type: string }
+    AccountId:
+      type: string
+      description: Checksum-valid G... account.
+      example: GBZXN7PIRZGNMHGA7MUUUF4GWPY5AYPV6LY4UV2GL6VJGIQRXFDNMADI
+    Amount:
+      type: string
+      description: Decimal string with at most 7 decimal places. Never a JSON number.
+      pattern: "^[0-9]+(\\.[0-9]{1,7})?$"
+      example: "12.5"
+    Asset:
+      type: string
+      description: "`XLM`, `native` or `CODE:ISSUER`."
+      example: "USDC:GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN"
+    PathAssets:
+      type: array
+      maxItems: 5
+      description: Intermediate `CODE:ISSUER` assets from the chosen /paths/* record. Empty or omitted for a direct trade.
+      items: { type: string }
+    SlippageBps:
+      type: integer
+      minimum: 0
+      maximum: 500
+      default: 50
+      description: Tolerance in basis points applied to the quote.
+    UnsignedTransaction:
+      type: object
+      required: [xdr, networkPassphrase, fee, sequence, timeBounds, expiresAt]
+      properties:
+        xdr: { type: string, description: Base64 XDR of the unsigned envelope. }
+        networkPassphrase: { type: string, description: Sign against this passphrase. }
+        fee: { type: string, description: Total fee in stroops. }
+        sequence: { type: string, description: Sequence number the transaction uses. Not reserved. }
+        timeBounds:
+          type: object
+          required: [minTime, maxTime]
+          properties:
+            minTime: { type: string, description: Unix seconds. }
+            maxTime: { type: string, description: Unix seconds; "0" means no expiry. }
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+          description: "`timeBounds.maxTime` as an ISO timestamp."
+    PathPaymentDisplay:
+      type: object
+      required: [expectedSend, expectedReceive, slippageBps, path]
+      properties:
+        expectedSend: { $ref: "#/components/schemas/Amount" }
+        expectedReceive: { $ref: "#/components/schemas/Amount" }
+        slippageBps: { type: integer }
+        path: { type: array, items: { type: string } }
+    SubmitResult:
+      type: object
+      required: [hash, successful]
+      properties:
+        hash: { type: string }
+        ledger: { type: integer, description: "Absent when replayed from the idempotency cache." }
+        successful: { type: boolean }
+    SubmitPending:
+      type: object
+      required: [hash, status]
+      properties:
+        hash: { type: string }
+        status: { type: string, const: pending }

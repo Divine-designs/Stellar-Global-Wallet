@@ -26,7 +26,7 @@ sequenceDiagram
     participant Net as Horizon / Soroban RPC
     participant SSE as SSE status stream
 
-    App->>API: POST /wallet/send (intent)
+    App->>API: POST /wallet/send/build (intent)
     API-->>App: unsigned XDR + network passphrase + operationType
     App->>Wallet: signTransaction(xdr, { networkPassphrase })
     Wallet-->>App: signed XDR (or user rejection)
@@ -37,6 +37,30 @@ sequenceDiagram
     App->>SSE: subscribe(hash)
     SSE-->>App: pending → success | failed
 ```
+
+## Endpoints
+
+| Flow | Build (unsigned XDR) | Submit |
+| --- | --- | --- |
+| Payment | `POST /wallet/send/build` | `POST /wallet/submit` |
+| Path payment, exact send | `POST /wallet/path-payment-strict-send/build` | `POST /wallet/submit` |
+| Path payment, exact receive | `POST /wallet/path-payment-strict-receive/build` | `POST /wallet/submit` |
+| Soroban `record_spend` | `POST /contract/wallet/spend/build` | `POST /contract/wallet/submit` |
+
+Request and response shapes are in
+[`openapi-client-signing.yaml`](openapi-client-signing.yaml). None of these
+accepts a secret key: a secret-looking or unknown body field is a 400.
+Every build response carries `xdr`, `networkPassphrase`, `fee`, `sequence`,
+`timeBounds` and `expiresAt`; the transaction is valid for 180 seconds.
+Nothing is submitted by a build, so two builds in a row return the **same**
+`sequence` — only the first one signed and submitted will succeed.
+
+Path payments take the route and quoted amount the user picked from the
+`/wallet/paths/*` quote routes plus `slippageBps` (default 50, max 500). The
+server turns that into `destMin` (rounded down) or `sendMax` (rounded up), so
+the client never does that arithmetic. The response repeats the amounts as
+`expectedSend`, `expectedReceive` and `minReceive` / `maxSend` for the review
+screen.
 
 Key rules:
 
@@ -54,7 +78,7 @@ Key rules:
 import { signTransaction, isConnected } from '@stellar/freighter-api';
 
 // 1. Ask the API to build the transaction.
-const build = await fetch('/api/v1/wallet/send', {
+const build = await fetch('/api/v1/wallet/send/build', {
   method: 'POST',
   headers: { 'content-type': 'application/json', authorization: `Bearer ${jwt}` },
   body: JSON.stringify({ sourcePublicKey, destinationPublicKey, amount, asset, memo }),
@@ -145,16 +169,22 @@ Soroban contract invocations differ from classic payments:
 ```mermaid
 sequenceDiagram
     autonumber
-    App->>API: POST /wallet/contract-call (intent)
+    App->>API: POST /contract/wallet/spend/build (intent)
     API->>Net: simulateTransaction
     Net-->>API: footprint + resource fee
     API-->>App: unsigned XDR (with auth entries)
     App->>Wallet: signTransaction(xdr)
     Wallet-->>App: signed XDR
-    App->>API: POST /wallet/submit
-    API->>Net: sendTransaction
+    App->>API: POST /contract/wallet/submit
+    API->>Net: sendTransaction, then poll getTransaction
     Net-->>API: hash / error
 ```
+
+The build response adds `minResourceFee`, `authEntries` (base64 XDR) and
+`latestLedger` to the usual fields. If simulation rejects the call the build
+fails with the contract's own code, for example `SPEND_LIMIT_EXCEEDED`, before
+anything is signed. Submit waits up to 30 seconds for a final status and
+otherwise answers 202 with the `hash`.
 
 ## Troubleshooting
 
@@ -165,12 +195,24 @@ sequenceDiagram
 | `tx_insufficient_fee` | The fee is below the current network minimum. | Rebuild to get the current fee, or submit a [fee-bump](https://developers.stellar.org/docs/learn/encyclopedia/transactions-specialized/fee-bump-transactions) transaction. |
 | `op_no_trust` | The destination account has no trustline for the asset. | Ask the user to add a trustline, or send XLM instead. The precheck endpoint reports this as `NO_TRUSTLINE`. |
 | `PATH_EXPIRED` | A path-payment offer used in the path has expired. | Rebuild the path payment to get fresh offers and re-sign. |
+| `TX_EXPIRED` | The signed XDR's `timeBounds.maxTime` has passed (checked before Horizon is called, or Horizon's `tx_too_late`). | Rebuild and sign again. |
+| `TX_ALREADY_SUBMITTED` | This exact signed XDR is already on the ledger. The error carries its `hash`. | Treat it as success and look the transaction up by `hash`. |
+| `SOROBAN_REBUILD_REQUIRED` | The simulated footprint, sequence or fee no longer fits the ledger (`txSorobanInvalid`, `txBadSeq`, `txInsufficientFee`). | Call the Soroban build endpoint again so it re-simulates, then sign the new XDR. |
+| `INVALID_TRANSACTION` | The submitted XDR does not parse, is unsigned, or was signed for another network (`details.reason`). | Sign the XDR the API returned, with its `networkPassphrase`. |
 
 ### Retry policy
 
-- `tx_bad_seq`, `tx_too_late`, `tx_insufficient_fee`, `PATH_EXPIRED` are
-  **retryable after a rebuild**. Rebuild → re-sign → resubmit, at most 3 times.
+- `tx_bad_seq`, `tx_too_late`, `tx_insufficient_fee`, `PATH_EXPIRED`,
+  `TX_EXPIRED` and `SOROBAN_REBUILD_REQUIRED` are **retryable after a rebuild**. Rebuild → re-sign → resubmit, at most 3 times.
 - `op_no_trust` and other `op_*` errors are **not retryable** without user
   action; surface the message and stop.
 - A user rejection from the wallet is not an error to retry — return to the
   review screen.
+
+### Safe retries
+
+Send an `Idempotency-Key` header (or an `idempotencyKey` body field) with
+`POST /wallet/submit`. Repeating the request with the same key from the same
+source account within 24 hours returns the first `{ hash, successful }`
+instead of submitting again. A 202 `pending` response (Horizon timed out) is
+not cached; poll the `hash` rather than resubmitting.

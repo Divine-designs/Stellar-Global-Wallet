@@ -94,6 +94,13 @@ below) — the live error text matched the expected format exactly.
   fee-paying, state-changing call, so it sits behind the same boundary as
   the existing fund-movement endpoint.
 
+- `POST /api/v1/contract/wallet/spend/build` and
+  `POST /api/v1/contract/wallet/submit` — also gated by `jwtAuth`, and the
+  non-custodial way to record a spend: build simulates `record_spend` for a
+  **public** key and returns the unsigned XDR, the user signs it in their own
+  wallet, and submit sends it and polls to a final status. Neither accepts a
+  secret key. See [client-signing.md](client-signing.md#soroban-auth-entries-simulation-and-rebuilds).
+
 ## A caveat about the contract repo's `WalletError` enum
 
 While validating this against a live deployment, `Orbit-Wal/contract`'s
